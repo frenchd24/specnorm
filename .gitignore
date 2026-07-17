@@ -9,3 +9,4 @@ dist/
 *.pdf
 *.png
 *tests*.py
+.DS_Store
