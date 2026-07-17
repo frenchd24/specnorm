@@ -68,6 +68,7 @@ class WindowState:
     degree: int = 3
     continuum: Optional[np.ndarray] = None  # evaluated on window pixels
     cont_err: Optional[np.ndarray] = None   # 1-sigma continuum uncertainty
+    fitter: Optional[BaseFitter] = None     # the fitted model itself
     rejected: Optional[np.ndarray] = None   # sigma-clipped pixels (window sel)
     accepted: bool = False
 
@@ -394,6 +395,7 @@ class ContinuumGUI:
                             init_x=init_x, init_y=init_y)
             st.continuum = fitter(self.spec.wavelength[sel])
             st.cont_err = fitter.uncertainty(self.spec.wavelength[sel])
+            st.fitter = fitter
             # Map clipped points back onto the window for display.
             rejected_global = np.zeros(len(self.spec), dtype=bool)
             rejected_global[np.flatnonzero(use)] = ~fitter.keep
@@ -406,6 +408,7 @@ class ContinuumGUI:
             fitter.fit(st.nodes_x, st.nodes_y, st.nodes_e)
             st.continuum = fitter(self.spec.wavelength[sel])
             st.cont_err = fitter.uncertainty(self.spec.wavelength[sel])
+            st.fitter = fitter
         self._draw()
 
     def _draw(self, message: str = ""):
@@ -498,22 +501,46 @@ class ContinuumGUI:
             print(f"Warning: could not write masked file: {exc}")
 
     def _assemble(self) -> NormalizedSpectrum:
-        wave = self.spec.wavelength
+        return self.assemble_on(self.spec)
+
+    def assemble_on(self, spectrum: Spectrum) -> NormalizedSpectrum:
+        """Evaluate the accepted continuum fits on an arbitrary spectrum.
+
+        This is how native-resolution output is produced when the fit
+        was done on binned data: the fitted models themselves are
+        re-evaluated on the target wavelength grid (exact — no
+        interpolation of binned arrays), blended with the same ramp
+        weights, and the interactive mask regions are re-applied to the
+        target pixels.
+        """
+        wave = spectrum.wavelength
         cont = np.zeros_like(wave)
         cerr = np.zeros_like(wave)
         weight = np.zeros_like(wave)
 
         for st in self.states:
-            if not st.accepted or st.continuum is None:
+            if not st.accepted or st.fitter is None:
                 continue
-            sel = self._window_sel(st)
+            sel = (wave >= st.w0) & (wave <= st.w1)
+            # Binned fitting grids start/end inside the native range
+            # (bin centers), so windows touching the ends of the
+            # fitting grid also cover the sub-bin overhang beyond it.
+            if st.w0 <= self.spec.wmin:
+                sel |= wave < st.w0
+            if st.w1 >= self.spec.wmax:
+                sel |= wave > st.w1
+            if not sel.any():
+                continue
             w = wave[sel]
+            c = st.fitter(w)
+            e = st.fitter.uncertainty(w)
             # Linear ramp weights -> smooth blending in overlap regions.
             span = max(st.w1 - st.w0, 1e-30)
-            ramp = np.minimum(w - st.w0, st.w1 - w) / span + 1e-3
-            cont[sel] += st.continuum * ramp
-            if st.cont_err is not None:
-                cerr[sel] += np.nan_to_num(st.cont_err) * ramp
+            ramp = np.clip(np.minimum(w - st.w0, st.w1 - w) / span,
+                           0.0, None) + 1e-3
+            cont[sel] += c * ramp
+            if e is not None:
+                cerr[sel] += np.nan_to_num(e) * ramp
             weight[sel] += ramp
 
         covered = weight > 0
@@ -522,10 +549,17 @@ class ContinuumGUI:
             cont = np.where(covered, cont / denom, np.nan)
             cerr = np.where(covered, cerr / denom, np.nan)
 
-        meta = dict(self.spec.meta)
+        # Interactive / pre-set mask regions apply on the target grid too.
+        mask = spectrum.mask.copy()
+        regions = list(self.spec.meta.get("mask_regions", []))
+        for (m0, m1) in regions:
+            mask |= (wave >= m0) & (wave <= m1)
+
+        meta = dict(spectrum.meta)
         meta["specnorm"] = {
-            "mask_regions": list(self.spec.meta.get("mask_regions", [])),
-            "binning": self.spec.meta.get("binning", 1),
+            "mask_regions": regions,
+            "binning": spectrum.meta.get("binning", 1),
+            "fit_binning": self.spec.meta.get("binning", 1),
             "windows": [
                 {"range": [s.w0, s.w1], "model": s.fitter_kind,
                  "degree": s.degree, "n_nodes": len(s.nodes_x),
@@ -534,16 +568,25 @@ class ContinuumGUI:
                 for s in self.states
             ],
         }
-        return NormalizedSpectrum(wave, self.spec.flux, cont,
-                                  self.spec.error,
-                                  mask=self.spec.mask.copy(),
+        return NormalizedSpectrum(wave, spectrum.flux, cont,
+                                  spectrum.error, mask=mask,
                                   cont_err=cerr, meta=meta)
 
 
 def normalize_interactive(spectrum: Spectrum, window: float = 20.0,
                           overlap: float = 0.10, fitter: str = "spline",
-                          degree: int = 3, **kwargs) -> NormalizedSpectrum:
-    """Convenience wrapper: run the GUI and return the result."""
+                          degree: int = 3,
+                          output_on: Optional[Spectrum] = None,
+                          **kwargs) -> NormalizedSpectrum:
+    """Convenience wrapper: run the GUI and return the result.
+
+    If ``output_on`` is given (e.g. the unbinned spectrum when
+    ``spectrum`` is binned for fitting), the accepted fits are
+    evaluated on that spectrum's wavelength grid instead.
+    """
     gui = ContinuumGUI(spectrum, window=window, overlap=overlap,
                        fitter=fitter, degree=degree, **kwargs)
-    return gui.run()
+    result = gui.run()
+    if output_on is not None:
+        return gui.assemble_on(output_on)
+    return result

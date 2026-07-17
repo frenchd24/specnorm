@@ -118,14 +118,14 @@ The model menu per window offers two genuinely different philosophies:
   sigma *below* the fit (absorption lines; default 1.5) or `high_rej` sigma
   *above* it (emission lines, cosmic rays; default 3.5) are rejected and the
   fit repeated, up to `--niterate` times (default 20). `--grow N` (default 6)
-  also rejects N neighbors of each clipped pixel to catch line wings.
+  also rejects N neighbours of each clipped pixel to catch line wings.
   Two safeguards keep the aggressive defaults from eating noise: low-side
   rejection requires at least `--min-pix` *consecutive* below-threshold
   pixels (default 3) — real lines are resolved into runs of adjacent low
   pixels, isolated noise dips are not — and iteration stops automatically
   once the residual sigma stops improving. (`--min-pix` doesn't apply to the
   high side, so single-pixel cosmic rays are still clipped; runs may include
-  already-rejected neighbors, so line wings beside a clipped core still
+  already-rejected neighbours, so line wings beside a clipped core still
   count.) Clipped pixels are shown as orange crosses.
 
   **Nodes guide the clipping.** A blind first fit fails when lines cover a
@@ -224,6 +224,16 @@ does the same from Python.
 propagates errors as `sqrt(sum(err^2))/n`, OR-combines DQ flags, and masks a
 bin if any input pixel is masked. The CLI applies `-b/--bin` (default 2)
 before the GUI opens.
+
+**Binning affects the fit, not the output.** You interact with the binned
+spectrum (better S/N for placing the continuum), but the output is written
+at **native resolution**: the fitted models are re-evaluated exactly on the
+original pixels (no interpolation of binned arrays), blended with the same
+weights, with masks re-applied and the error band recomputed per pixel.
+Pass `--write-binned` to write the binned spectrum instead, or from Python
+use `normalize_interactive(binned, ..., output_on=native)` /
+`gui.assemble_on(native)`. The metadata records both grids
+(`binning` = output, `fit_binning` = fitting).
 
 ## Example with synthetic data
 
