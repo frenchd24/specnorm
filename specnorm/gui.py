@@ -43,8 +43,8 @@ HELP_TEXT = (
     "region, right click = undo last mask)   u: undo node (or un-accept previous "
     "window)   r: reset nodes\n"
     "f: fit   s: spline (thru nodes)   c: Chebyshev (fits data, sigma-clips "
-    "lines; nodes set ref level)   1-5: degree   enter/a: accept & next   "
-    "b: back   q: quit & save"
+    "lines; nodes set ref level)   1-5: degree   +/-: widen/narrow window   "
+    "0: reset width   enter/a: accept & next   b: back   q: quit & save"
 )
 
 # Default geocoronal airglow regions (Angstroms): Ly-alpha and the OI
@@ -70,6 +70,7 @@ class WindowState:
     cont_err: Optional[np.ndarray] = None   # 1-sigma continuum uncertainty
     fitter: Optional[BaseFitter] = None     # the fitted model itself
     rejected: Optional[np.ndarray] = None   # sigma-clipped pixels (window sel)
+    resized: bool = False                   # width changed from its tile
     accepted: bool = False
 
 
@@ -138,13 +139,20 @@ class ContinuumGUI:
             self.spec.mask_region(m0, m1)
         self._refresh_good()
 
+        self.overlap = float(np.clip(overlap, 0.0, 0.5))
+        self.default_window = float(window)
+        self.init_fitter = fitter
+        self.init_degree = degree
         self.window_edges = _build_windows(spectrum.wmin, spectrum.wmax,
-                                           window, np.clip(overlap, 0.0, 0.5))
+                                           window, self.overlap)
         self.states = [WindowState(w0, w1, fitter_kind=fitter, degree=degree)
                        for (w0, w1) in self.window_edges]
         self.idx = 0
         width = self.window_edges[0][1] - self.window_edges[0][0]
         self.node_box = node_box if node_box is not None else 0.005 * width
+        # Each resize keystroke moves each edge by half the default width.
+        self.window_step = 0.5 * self.default_window
+        self.min_window = max(0.1 * self.default_window, 3 * self.node_box)
 
         self._fig = None
         self._ax = None
@@ -319,6 +327,10 @@ class ContinuumGUI:
             if st.continuum is None:
                 return  # fit failed; message already shown
             st.accepted = True
+            if st.resized:
+                # Resizing changed this window's span, so re-tile the
+                # remaining spectrum from its new right edge.
+                self._retile_tail()
             self._write_masked()
             if self.idx + 1 < len(self.states):
                 self.idx += 1
@@ -328,6 +340,12 @@ class ContinuumGUI:
             else:
                 self._finished = True
                 plt.close(self._fig)
+        elif key in ("+", "="):
+            self._resize_window(+1)
+        elif key in ("-", "_"):
+            self._resize_window(-1)
+        elif key == "0":
+            self._reset_window()
         elif key == "b" and self.idx > 0:
             self.idx -= 1
             self._draw()
@@ -340,6 +358,87 @@ class ContinuumGUI:
     # ------------------------------------------------------------------
     def _window_sel(self, st: WindowState) -> np.ndarray:
         return (self.spec.wavelength >= st.w0) & (self.spec.wavelength <= st.w1)
+
+    # ------------------------------------------------------------------
+    # Window resizing (zoom out across broad features, then back in)
+    # ------------------------------------------------------------------
+    def _resize_window(self, direction: int):
+        """Grow (direction>0) or shrink (direction<0) the current window.
+
+        Both edges move outward/inward by half the default window width
+        per press, clamped to the spectrum bounds and a minimum width.
+        The continuum is re-fit over the new span if enough nodes exist.
+        """
+        if self.default_window <= 0:
+            self._draw(message="Resize is unavailable when fitting the "
+                               "whole spectrum at once (-w 0)")
+            return
+        st = self.states[self.idx]
+        step = direction * self.window_step
+        new_w0 = max(st.w0 - step, self.spec.wmin)
+        new_w1 = min(st.w1 + step, self.spec.wmax)
+        if new_w1 - new_w0 < self.min_window:
+            self._draw(message=f"Minimum window width is "
+                               f"{self.min_window:.2f}")
+            return
+        st.w0, st.w1 = new_w0, new_w1
+        st.resized = True
+        st.continuum = st.cont_err = st.rejected = None
+        width = st.w1 - st.w0
+        if len(st.nodes_x) >= 2 or (st.fitter_kind == "cheb"):
+            self._fit_current()
+        else:
+            self._draw(message=f"Window width {width:.2f} "
+                               "(place nodes across the feature, then f)")
+
+    def _reset_window(self):
+        """Restore the current window to the default width (recentred)."""
+        if self.default_window <= 0:
+            return
+        st = self.states[self.idx]
+        centre = 0.5 * (st.w0 + st.w1)
+        half = 0.5 * self.default_window
+        st.w0 = max(centre - half, self.spec.wmin)
+        st.w1 = min(centre + half, self.spec.wmax)
+        st.resized = True
+        st.continuum = st.cont_err = st.rejected = None
+        if len(st.nodes_x) >= 2 or st.fitter_kind == "cheb":
+            self._fit_current()
+        else:
+            self._draw(message="Window reset to default width")
+
+    def _retile_tail(self):
+        """Rebuild the windows after the current one from its right edge.
+
+        Called when a resized window is accepted so the remaining
+        spectrum is re-tiled at the default width with no gap or large
+        overlap.  Downstream windows are regenerated (any unaccepted
+        work on them is discarded), which matches the normal
+        left-to-right workflow of widening a window at a broad feature
+        and then continuing.
+        """
+        cur = self.states[self.idx]
+        # Preserve any *accepted* downstream windows (rare, from going
+        # back); only re-tile the region not already covered by them.
+        downstream_accepted = [s for s in self.states[self.idx + 1:]
+                               if s.accepted]
+        start = cur.w1 - self.overlap * self.default_window
+        if self.default_window <= 0 or start >= self.spec.wmax:
+            self.states[self.idx + 1:] = downstream_accepted
+            return
+        edges = _build_windows(start, self.spec.wmax,
+                               self.default_window, self.overlap)
+        covered = [(s.w0, s.w1) for s in downstream_accepted]
+
+        def _overlaps_accepted(w0, w1):
+            return any(a0 < w1 and w0 < a1 for (a0, a1) in covered)
+
+        new_tail = [WindowState(w0, w1, fitter_kind=self.init_fitter,
+                                degree=self.init_degree)
+                    for (w0, w1) in edges if not _overlaps_accepted(w0, w1)]
+        tail = downstream_accepted + new_tail
+        tail.sort(key=lambda s: s.w0)
+        self.states[self.idx + 1:] = tail
 
     def _node_sample(self, x: float):
         """Return (median flux, 1-sigma uncertainty) near x, or None."""

@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "specnorm"
-version = "0.9.0"
+version = "0.11.0"
 description = "Interactive continuum normalization for HST/STIS, HST/COS, and generic astronomical spectra"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "David M. French", email = "dfrench@stsci.edu" }]
+authors = [{ name = "specnorm contributors" }]
 dependencies = [
     "numpy>=1.21",
     "scipy>=1.7",

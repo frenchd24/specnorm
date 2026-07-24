@@ -83,6 +83,8 @@ Use `--ext N` to force a specific FITS extension.
 | `s` | switch to cubic spline (interpolates through your nodes) |
 | `c` | switch to sigma-clipped Chebyshev (fits the data, rejects lines) |
 | `1`–`5` | set the degree of the current model (switches spline to polynomial) |
+| `+` / `-` | widen / narrow the current fitting window (both edges, by half the default width per press) |
+| `0` | reset the current window to the default width |
 | `enter` or `a` | accept this window's fit, advance to the next |
 | `b` | go back one window |
 | `q` | stop early and write whatever was accepted |
@@ -101,6 +103,19 @@ the reduced chi-square. The band is blended across windows like the
 continuum itself, carried on the result as `result.cont_err`, and drawn in
 the overview plot. A wide band means your continuum placement is poorly
 constrained there (few nodes, or few unclipped pixels).
+
+**Adjustable window (broad features).** For a wide absorption feature such
+as the Galactic Ly-alpha damping trough at 1215 A — far wider than a normal
+20 A window — press `+` to widen the current window until it spans the whole
+feature, place continuum nodes on the clean shoulders either side, and fit a
+flat/linear continuum straight across (a degree-1 polynomial or a spline
+through the two shoulders). Because node placement and the applied continuum
+both operate on the current window, widening it is what lets a single fit
+bridge the trough. When you accept a widened window, the remaining spectrum
+re-tiles at the default width from the new right edge, so you `+` to zoom
+out, fit across the feature, accept, and continue at normal resolution.
+`-` narrows again and `0` resets to the default width; the whole-spectrum
+mode (`-w 0`) has a single window and disables resizing.
 
 **Masking and y-scaling.** The y-axis autoscales to the *unmasked* data only,
 so a masked airglow spike no longer flattens the rest of the window. Masking a
