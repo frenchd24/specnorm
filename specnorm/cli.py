@@ -43,8 +43,14 @@ def main(argv=None) -> int:
                         help="Initial polynomial/Chebyshev degree, 1-5 "
                              "(default 3)")
     parser.add_argument("-b", "--bin", type=int, default=2, dest="nbin",
-                        help="Bin the spectrum by N pixels before fitting "
-                             "(default 2; use 1 for no binning)")
+                        help="Bin the spectrum by N pixels for FITTING "
+                             "(default 2; use 1 for no binning). The output "
+                             "is written at native resolution regardless, "
+                             "unless --write-binned is given.")
+    parser.add_argument("--write-binned", action="store_true",
+                        help="Write the binned spectrum instead of "
+                             "evaluating the continuum on the native-"
+                             "resolution pixels")
     parser.add_argument("--mask", type=_parse_region, action="append",
                         default=[], metavar="W0:W1",
                         help="Pre-mask a wavelength region (repeatable), "
@@ -116,9 +122,10 @@ def main(argv=None) -> int:
     if n_drop:
         print(f"Dropped {n_drop} fill/padding pixels with wavelength <= 0")
 
+    spec_native = spec
     if args.nbin > 1:
         spec = bin_spectrum(spec, args.nbin)
-        print(f"Binned x{args.nbin} -> {len(spec)} points")
+        print(f"Binned x{args.nbin} for fitting -> {len(spec)} points")
 
     mask_regions = list(args.mask)
     if args.airglow:
@@ -139,7 +146,14 @@ def main(argv=None) -> int:
         masked_path=masked_out,
         low_rej=args.low_rej, high_rej=args.high_rej,
         niterate=args.niterate, grow=args.grow, min_pix=args.min_pix,
+        output_on=(spec_native if args.nbin > 1 and not args.write_binned
+                   else None),
     )
+    if args.nbin > 1 and not args.write_binned:
+        print(f"Output evaluated on the native grid "
+              f"({len(spec_native)} px; fit used x{args.nbin} binning)")
+    elif args.nbin > 1:
+        print(f"Output on the x{args.nbin}-binned grid ({len(spec)} px)")
     if masked_out:
         print(f"Intermediate masked spectrum: {masked_out}")
 
