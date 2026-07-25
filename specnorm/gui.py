@@ -23,6 +23,13 @@ nodes:
   **0** restores the default width and flux scaling.  Zooming out across
   a broad damped feature (Galactic Ly-alpha at 1215 A) lets a single fit
   bridge it;
+* the blue curve is the **knitted continuum** — every accepted fit
+  blended together, exactly as it will be written out — so a join that
+  did not knit well is visible from any window and at any zoom.  The
+  window you are editing is previewed in it at top precedence until you
+  accept, and its own model is drawn separately as a dashed purple line
+  whenever the two differ.  Stretches with no fit yet appear as gaps in
+  the curve, marked along the bottom;
 * a coverage strip under the plot shows which parts of the spectrum
   already have accepted fits (green), which are masked (red), and where
   the current window sits; click it to jump to any window;
@@ -219,6 +226,7 @@ class ContinuumGUI:
         self.good = (self.spec.good_mask(use_dq=self.mask_dq, use_mask=True)
                      & ~self._no_data(self.spec))
         self._dead_cache = None
+        self._ref_cache = None
 
     @staticmethod
     def _no_data(spectrum: Spectrum) -> np.ndarray:
@@ -908,25 +916,56 @@ class ContinuumGUI:
         if st.nodes_x:
             ax.plot(st.nodes_x, st.nodes_y, "o", color="tab:red", ms=8,
                     mec="k", zorder=5, label="nodes")
-        # Evaluate the fit from the stored model so it stays visible
-        # after zooming, panning or navigating between windows.
+        # Evaluate this window's own model so it stays visible after
+        # zooming, panning or navigating between windows.
         if st.fitter is not None and w.size:
             st.continuum = st.fitter(w)
             st.cont_err = st.fitter.uncertainty(w)
         elif st.continuum is not None and st.continuum.size != w.size:
             st.continuum = st.cont_err = None
-        if st.continuum is not None:
-            ax.plot(w, st.continuum, color="tab:blue", lw=2, zorder=4,
+
+        # The headline curve is the *knitted* continuum — every accepted
+        # fit blended together, with this window's fit previewed at top
+        # precedence.  That is what will be written out, so joins that
+        # did not knit well are visible from any window and at any zoom.
+        knit = knit_err = None
+        if w.size:
+            # An accepted window is already part of the knit, so show the
+            # true blended result; only a fit that has not been accepted
+            # yet is previewed at top precedence.
+            knit, knit_err, knit_ok = self.knitted(
+                w, preview=None if st.accepted else st)
+            if not np.isfinite(knit).any():
+                knit = knit_err = None
+        if knit is not None:
+            ax.plot(w, knit, color="tab:blue", lw=2, zorder=4,
                     label="continuum")
-            if st.cont_err is not None:
-                hi_b = st.continuum + st.cont_err
-                lo_b = st.continuum - st.cont_err
+            if knit_err is not None and np.isfinite(knit_err).any():
+                hi_b, lo_b = knit + knit_err, knit - knit_err
                 ax.plot(w, hi_b, color="tab:blue", lw=0.9, ls="--",
                         alpha=0.7, zorder=4)
                 ax.plot(w, lo_b, color="tab:blue", lw=0.9, ls="--",
                         alpha=0.7, zorder=4, label=r"$\pm1\sigma$")
                 ax.fill_between(w, lo_b, hi_b, color="tab:blue",
                                 alpha=0.12, zorder=3)
+            # Show where nothing is fitted yet, so unfinished stretches
+            # inside the view are unmistakable.
+            hole = ~np.isfinite(knit)
+            if hole.any():
+                ylo_h = np.nanmin(f[g]) if f[g].size else 0.0
+                ax.plot(w[hole], np.full(int(hole.sum()), ylo_h), "|",
+                        color="0.6", ms=6, zorder=2, label="not fitted")
+        # This window's own model, drawn thin over its own span only, so
+        # you can see what you are editing against the knitted result.
+        if st.continuum is not None and knit is not None:
+            if not np.allclose(np.nan_to_num(st.continuum),
+                               np.nan_to_num(knit), rtol=1e-6, atol=0):
+                ax.plot(w, st.continuum, color="tab:purple", lw=1.0,
+                        ls="--", alpha=0.85, zorder=5,
+                        label="this window's fit")
+        elif st.continuum is not None:
+            ax.plot(w, st.continuum, color="tab:blue", lw=2, zorder=4,
+                    label="continuum")
         if st.continuum is not None and st.rejected is not None \
                 and st.rejected.size == w.size and st.rejected.any():
             ax.plot(w[st.rejected], f[st.rejected], "x", color="tab:orange",
@@ -936,8 +975,11 @@ class ContinuumGUI:
         # --- y autoscale ignoring masked / bad points -------------------
         ax.set_xlim(st.w0, st.w1)
         ref = f[g]
-        if st.continuum is not None:
-            ref = np.concatenate([ref, st.continuum[np.isfinite(st.continuum)]])
+        for curve in (knit, st.continuum):
+            if curve is not None:
+                finite = curve[np.isfinite(curve)]
+                if finite.size:
+                    ref = np.concatenate([ref, finite])
         if ref.size:
             lo, hi = float(np.min(ref)), float(np.max(ref))
             pad = 0.07 * (hi - lo) if hi > lo else (abs(hi) * 0.1 or 1.0)
@@ -945,7 +987,9 @@ class ContinuumGUI:
             if self._y_zoom != 1.0:
                 # Zoom about the continuum level, not the middle of the
                 # range, so the continuum stays in view as you zoom in.
-                if st.continuum is not None and np.isfinite(st.continuum).any():
+                if knit is not None and np.isfinite(knit).any():
+                    anchor = float(np.nanmedian(knit))
+                elif st.continuum is not None and np.isfinite(st.continuum).any():
                     anchor = float(np.nanmedian(st.continuum))
                 elif f[g].size:
                     anchor = float(np.median(f[g]))
@@ -1116,16 +1160,19 @@ class ContinuumGUI:
         except Exception as exc:  # don't let I/O kill the session
             print(f"Warning: could not write masked file: {exc}")
 
-    def _reference_level(self, spectrum: Spectrum) -> np.ndarray:
-        """Robust local flux level, used to judge competing fits.
+    def _reference_curve(self):
+        """Coarse (wavelength, level) sampling of the local flux level.
 
-        A high percentile of the good flux in coarse bands, interpolated
-        onto the pixel grid: close to the continuum where there is one,
-        and — crucially — never wild, so it can act as a sanity anchor
-        when two overlapping fits disagree.
+        A high percentile of the good flux in bands the width of a
+        fitting window: close to the continuum where there is one and
+        never wild, so it can anchor the comparison when two overlapping
+        fits disagree.  Cached, since it only changes when masks do.
         """
+        if getattr(self, "_ref_cache", None) is not None:
+            return self._ref_cache
+        spectrum = self.spec
         wave, flux = spectrum.wavelength, spectrum.flux
-        good = np.isfinite(flux) & ~spectrum.exclude.astype(bool)
+        good = self.good & np.isfinite(flux)
         width = (self.default_window if self.default_window > 0
                  else max((wave[-1] - wave[0]) / 10.0, 1e-30))
         nbin = max(int(np.ceil((wave[-1] - wave[0]) / width)), 1)
@@ -1140,11 +1187,106 @@ class ContinuumGUI:
             fallback = float(np.nanmedian(flux[good])) if good.any() else 1.0
             if not np.isfinite(fallback) or fallback <= 0:
                 fallback = 1.0
-            return np.full(wave.size, fallback)
-        ref = np.interp(wave, centres, levels)
-        positive = ref[ref > 0]
+            centres, levels = [float(wave[0]), float(wave[-1])], [fallback] * 2
+        levels = np.asarray(levels, dtype=float)
+        positive = levels[levels > 0]
         floor = (float(np.median(positive)) * 1e-3 if positive.size else 1e-30)
-        return np.maximum(ref, max(floor, 1e-30))
+        self._ref_cache = (np.asarray(centres, dtype=float), levels,
+                           max(floor, 1e-30))
+        return self._ref_cache
+
+    def _reference_level(self, spectrum: Spectrum) -> np.ndarray:
+        """Local flux level evaluated on a spectrum's wavelength grid."""
+        return self._ref_at(spectrum.wavelength)
+
+    def _ref_at(self, wave: np.ndarray) -> np.ndarray:
+        centres, levels, floor = self._reference_curve()
+        return np.maximum(np.interp(wave, centres, levels), floor)
+
+    def _blend(self, wave: np.ndarray, entries):
+        """Knit fits together on a wavelength grid.
+
+        ``entries`` is a sequence of ``(window, sequence)`` pairs; the
+        sequence number sets precedence, so a fit being previewed can be
+        given the top slot without being accepted.  Returns
+        ``(continuum, uncertainty, weight)`` with weight 0 where nothing
+        covers a pixel.  See :meth:`assemble_on` for the weighting.
+        """
+        cont = np.zeros_like(wave)
+        cerr = np.zeros_like(wave)
+        weight = np.zeros_like(wave)
+        pieces = []
+        for (st, seq) in entries:
+            if st.fitter is None:
+                continue
+            sel = (wave >= st.w0) & (wave <= st.w1)
+            # Binned fitting grids start/end inside the native range
+            # (bin centers), so windows touching the ends of the
+            # fitting grid also cover the sub-bin overhang beyond it.
+            if st.w0 <= self.spec.wmin:
+                sel |= wave < st.w0
+            if st.w1 >= self.spec.wmax:
+                sel |= wave > st.w1
+            if not sel.any():
+                continue
+            w = wave[sel]
+            pieces.append((st, seq, sel, w, st.fitter(w),
+                           st.fitter.uncertainty(w)))
+        if not pieces:
+            return cont, cerr, weight
+
+        ref = self._ref_at(wave)
+        # Newest contribution covering each pixel, and the closest any
+        # candidate there comes to the local flux level.
+        newest = np.full(wave.size, -np.inf)
+        best_dev = np.full(wave.size, np.inf)
+        for (st, seq, sel, w, c, _e) in pieces:
+            newest[sel] = np.maximum(newest[sel], seq)
+            best_dev[sel] = np.minimum(best_dev[sel], np.abs(c - ref[sel]))
+
+        for (st, seq, sel, w, c, e) in pieces:
+            span = max(st.w1 - st.w0, 1e-30)
+            # A small floor keeps a fit from being defenceless at its
+            # own edge, where its taper would otherwise vanish and a
+            # diverging neighbour could win by default.
+            taper = np.clip(np.minimum(w - st.w0, st.w1 - w) / span,
+                            0.0, None) + 0.02
+            recency = self.recency_base ** -(newest[sel] - seq)
+            # How much further than the best available candidate this
+            # fit strays from the local flux level, in units of that
+            # level: 0 for the closest fit, large for a runaway one.
+            excess = (np.abs(c - ref[sel]) - best_dev[sel]) / ref[sel]
+            # Quartic so a fit that has run away by orders of magnitude
+            # is suppressed decisively, while a fit that merely differs
+            # a little is barely touched.
+            agreement = 1.0 / (1.0 + np.maximum(excess, 0.0) ** 2) ** 2
+            reliability = np.maximum(
+                self._support_weight(st, w) * agreement, 1e-6)
+            wgt = taper * recency * reliability
+            cont[sel] += c * wgt
+            if e is not None:
+                cerr[sel] += np.nan_to_num(e) * wgt
+            weight[sel] += wgt
+        return cont, cerr, weight
+
+    def knitted(self, wave: np.ndarray, preview: Optional[WindowState] = None):
+        """The knitted continuum on ``wave``, as it would be written out.
+
+        ``preview`` is a window whose fit is not (yet) accepted but
+        should take precedence, so the display can show exactly what
+        accepting it would produce.
+        """
+        entries = [(s, s.accept_seq) for s in self.states
+                   if s.accepted and s.fitter is not None and s is not preview]
+        if preview is not None and preview.fitter is not None:
+            entries.append((preview, self._accept_seq))
+        cont, cerr, weight = self._blend(wave, entries)
+        covered = weight > 0
+        with np.errstate(invalid="ignore"):
+            denom = np.where(covered, weight, 1.0)
+            cont = np.where(covered, cont / denom, np.nan)
+            cerr = np.where(covered, cerr / denom, np.nan)
+        return cont, cerr, covered
 
     @staticmethod
     def _support_weight(st: WindowState, w: np.ndarray) -> np.ndarray:
@@ -1181,67 +1323,7 @@ class ContinuumGUI:
           dragging the knitted continuum with it.
         """
         wave = spectrum.wavelength
-        cont = np.zeros_like(wave)
-        cerr = np.zeros_like(wave)
-        weight = np.zeros_like(wave)
-
-        accepted = [st for st in self.states
-                    if st.accepted and st.fitter is not None]
-        pieces = []
-        for st in accepted:
-            sel = (wave >= st.w0) & (wave <= st.w1)
-            # Binned fitting grids start/end inside the native range
-            # (bin centers), so windows touching the ends of the
-            # fitting grid also cover the sub-bin overhang beyond it.
-            if st.w0 <= self.spec.wmin:
-                sel |= wave < st.w0
-            if st.w1 >= self.spec.wmax:
-                sel |= wave > st.w1
-            if not sel.any():
-                continue
-            w = wave[sel]
-            pieces.append((st, sel, w, st.fitter(w), st.fitter.uncertainty(w)))
-
-        if pieces:
-            ref = self._reference_level(spectrum)
-            # Newest acceptance covering each pixel, and the closest any
-            # candidate there comes to the local flux level.
-            newest = np.full(wave.size, -np.inf)
-            best_dev = np.full(wave.size, np.inf)
-            for (st, sel, w, c, _e) in pieces:
-                newest[sel] = np.maximum(newest[sel], st.accept_seq)
-                dev = np.abs(c - ref[sel])
-                best_dev[sel] = np.minimum(best_dev[sel], dev)
-
-            for (st, sel, w, c, e) in pieces:
-                span = max(st.w1 - st.w0, 1e-30)
-                # A small floor keeps a fit from being defenceless at its
-                # own edge, where its taper would otherwise vanish and a
-                # diverging neighbour could win by default.
-                taper = np.clip(np.minimum(w - st.w0, st.w1 - w) / span,
-                                0.0, None) + 0.02
-                recency = self.recency_base ** -(newest[sel] - st.accept_seq)
-                # How much further than the best available candidate this
-                # fit strays from the local flux level, in units of that
-                # level: 0 for the closest fit, large for a runaway one.
-                excess = (np.abs(c - ref[sel]) - best_dev[sel]) / ref[sel]
-                # Quartic so a fit that has run away by orders of
-                # magnitude is suppressed decisively, while a fit that
-                # merely differs a little is barely touched.
-                agreement = 1.0 / (1.0 + np.maximum(excess, 0.0) ** 2) ** 2
-                reliability = np.maximum(
-                    self._support_weight(st, w) * agreement, 1e-6)
-                wgt = taper * recency * reliability
-                cont[sel] += c * wgt
-                if e is not None:
-                    cerr[sel] += np.nan_to_num(e) * wgt
-                weight[sel] += wgt
-
-        covered = weight > 0
-        with np.errstate(invalid="ignore"):
-            denom = np.where(covered, weight, 1.0)
-            cont = np.where(covered, cont / denom, np.nan)
-            cerr = np.where(covered, cerr / denom, np.nan)
+        cont, cerr, covered = self.knitted(wave)
 
         # Pixels with no measurement — the zero-flux, zero-error padding
         # at detector edges — get the nearest fit extended over them

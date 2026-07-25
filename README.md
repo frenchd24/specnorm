@@ -98,6 +98,16 @@ toolbar tool is active (matplotlib's default key shortcuts are disabled so
 they don't collide with the bindings above). Each window remembers its own
 nodes and model, so you can go back and revise.
 
+**The plot always shows the knitted continuum.** The blue curve is not
+the current window's model in isolation — it is every accepted fit blended
+together exactly as it will be written out. Zoom out and you see the real
+continuum across all those windows, so you can judge which regions need
+redoing and spot joins that knitted badly. The window you are editing is
+previewed in that curve at top precedence (so you see what accepting will
+produce), and where its own model differs from the knitted result it is
+drawn separately as a dashed purple line. Stretches with no fit yet appear
+as breaks in the curve, marked along the bottom axis.
+
 **Continuum error band.** Every fit shows a 1-sigma uncertainty band
 (dashed lines + faint fill): node-based models propagate the uncertainty of
 each node (standard error of the median in the click box) — interpolated for
