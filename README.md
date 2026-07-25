@@ -83,8 +83,10 @@ Use `--ext N` to force a specific FITS extension.
 | `s` | switch to cubic spline (interpolates through your nodes) |
 | `c` | switch to sigma-clipped Chebyshev (fits the data, rejects lines) |
 | `1`–`5` | set the degree of the current model (switches spline to polynomial) |
-| `+` / `-` | widen / narrow the current fitting window (both edges, by half the default width per press) |
+| `+` / `-` | zoom the current window out / in (geometric, x1.5 per press, about the window centre) |
+| `←` / `→` | pan the window left / right by a quarter of its width, keeping the width |
 | `0` | reset the current window to the default width |
+| click the coverage strip | jump to the window at that wavelength |
 | `enter` or `a` | accept this window's fit, advance to the next |
 | `b` | go back one window |
 | `q` | stop early and write whatever was accepted |
@@ -106,16 +108,33 @@ constrained there (few nodes, or few unclipped pixels).
 
 **Adjustable window (broad features).** For a wide absorption feature such
 as the Galactic Ly-alpha damping trough at 1215 A — far wider than a normal
-20 A window — press `+` to widen the current window until it spans the whole
+20 A window — press `+` to zoom out until the window spans the whole
 feature, place continuum nodes on the clean shoulders either side, and fit a
 flat/linear continuum straight across (a degree-1 polynomial or a spline
 through the two shoulders). Because node placement and the applied continuum
-both operate on the current window, widening it is what lets a single fit
-bridge the trough. When you accept a widened window, the remaining spectrum
-re-tiles at the default width from the new right edge, so you `+` to zoom
-out, fit across the feature, accept, and continue at normal resolution.
-`-` narrows again and `0` resets to the default width; the whole-spectrum
-mode (`-w 0`) has a single window and disables resizing.
+both operate on the current window, zooming out is what lets a single fit
+bridge the trough. `-` zooms back in, the arrow keys pan the window without
+changing its width, and `0` restores the default width. Zoom is geometric
+(x1.5 per press) about the window centre, so repeated presses scale smoothly
+in both directions.
+
+The fit follows the view: it is re-evaluated from the fitted model whenever
+you zoom, pan, or move between windows, so a continuum you have fitted stays
+visible (and the title reports `no fit yet` / `fitted, not accepted` /
+`ACCEPTED` so you always know where a window stands). Changing a model to
+one that cannot be fitted with the nodes available — say pressing `5` with
+three nodes placed — reverts to the previous model rather than discarding
+your fit.
+
+When you accept a window whose span you changed, the rest of the spectrum
+re-tiles at the default width from its right edge, preserving any downstream
+windows you had already fitted. Because zooming and panning can leave a
+stretch behind unfitted, a **coverage strip** under the plot shows the whole
+spectrum with accepted fits in green, masked regions in red, and a box
+around the current window; it reports how many unfitted regions remain, a
+message warns you if accepting leaves a gap behind, and clicking the strip
+jumps straight to any window. The whole-spectrum mode (`-w 0`) has a single
+window and disables zooming and panning.
 
 **Masking and y-scaling.** The y-axis autoscales to the *unmasked* data only,
 so a masked airglow spike no longer flattens the rest of the window. Masking a
