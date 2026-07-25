@@ -27,7 +27,8 @@ def _infer_window(result: NormalizedSpectrum) -> Optional[float]:
 
 
 def plot_overview(result: NormalizedSpectrum, path: str,
-                  zoom: float = 3.0, window: Optional[float] = None) -> str:
+                  zoom: float = 3.0, window: Optional[float] = None,
+                  overlap: float = 0.15) -> str:
     """Save an overview figure of flux + continuum.
 
     Parameters
@@ -44,6 +45,10 @@ def plot_overview(result: NormalizedSpectrum, path: str,
         metadata; pass it explicitly for results built by hand.
         If neither is available (or the value is <= 0), the whole
         spectrum is shown in a single panel.
+    overlap : float
+        Fraction of each panel repeated on the next one (default 0.15),
+        so the right edge of one row can be matched to the left edge of
+        the row below.  The shared stretch is tinted in both panels.
 
     Returns
     -------
@@ -55,22 +60,37 @@ def plot_overview(result: NormalizedSpectrum, path: str,
     if window is None:
         window = _infer_window(result)
 
+    overlap = float(np.clip(overlap, 0.0, 0.5))
     if window and window > 0:
         chunk = zoom * window
-        edges = np.arange(wave[0], wave[-1], chunk)
-        chunks = [(w0, min(w0 + chunk, wave[-1])) for w0 in edges]
+        step = chunk * (1.0 - overlap)
+        chunks = []
+        w0 = wave[0]
+        while True:
+            w1 = min(w0 + chunk, wave[-1])
+            chunks.append((w0, w1))
+            if w1 >= wave[-1]:
+                break
+            w0 += step
+        share = chunk * overlap
     else:
         chunks = [(wave[0], wave[-1])]
+        share = 0.0
 
-    mask_regions = result.meta.get("specnorm", {}).get(
-        "mask_regions", result.meta.get("mask_regions", []))
+    sn = result.meta.get("specnorm", {})
+    exclude_regions = sn.get("exclude_regions",
+                             result.meta.get("exclude_regions", []))
+    fit_regions = sn.get("fit_mask_regions",
+                         result.meta.get("fit_mask_regions", []))
 
-    def _draw_panel(ax, w0, w1):
+    def _draw_panel(ax, w0, w1, first=False, last=False):
         sel = (wave >= w0) & (wave <= w1)
         w, f, c = wave[sel], result.flux[sel], result.continuum[sel]
         good = np.isfinite(f)
         if result.mask is not None:
             good &= ~result.mask[sel].astype(bool)
+        for (m0, m1) in fit_regions:   # fit masks shape the y-scale too
+            good &= ~((w >= m0) & (w <= m1))
         ax.plot(w, f, color="0.35", lw=0.6, drawstyle="steps-mid",
                 label="flux")
         ax.plot(w, c, color="tab:blue", lw=1.6, label="continuum")
@@ -84,10 +104,27 @@ def plot_overview(result: NormalizedSpectrum, path: str,
                         ls="--", alpha=0.7)
                 ax.fill_between(w[band], (c - ce)[band], (c + ce)[band],
                                 color="tab:blue", alpha=0.12, zorder=1)
-        for (m0, m1) in mask_regions:
+        for (m0, m1) in fit_regions:
+            if m1 >= w0 and m0 <= w1:
+                ax.axvspan(max(m0, w0), min(m1, w1), color="darkorange",
+                           alpha=0.10, zorder=0)
+        for (m0, m1) in exclude_regions:
             if m1 >= w0 and m0 <= w1:
                 ax.axvspan(max(m0, w0), min(m1, w1), color="red",
-                           alpha=0.10, zorder=0)
+                           alpha=0.13, zorder=0)
+        # Tint the stretches shared with the neighbouring panels so the
+        # rows can be matched up by eye.
+        if share > 0:
+            if not first:
+                ax.axvspan(w0, min(w0 + share, w1), color="0.55",
+                           alpha=0.13, zorder=0)
+                ax.axvline(min(w0 + share, w1), color="0.45", lw=0.7,
+                           ls=":", zorder=2)
+            if not last:
+                ax.axvspan(max(w1 - share, w0), w1, color="0.55",
+                           alpha=0.13, zorder=0)
+                ax.axvline(max(w1 - share, w0), color="0.45", lw=0.7,
+                           ls=":", zorder=2)
         # y-limits from unmasked flux + finite continuum (mask-immune).
         ref = f[good]
         finite_c = c[np.isfinite(c)]
@@ -112,10 +149,15 @@ def plot_overview(result: NormalizedSpectrum, path: str,
                 fig, axes = plt.subplots(len(page), 1,
                                          figsize=(11, 2.6 * len(page) + 0.8),
                                          squeeze=False)
-                for ax, (w0, w1) in zip(axes[:, 0], page):
-                    _draw_panel(ax, w0, w1)
+                for k, (ax, (w0, w1)) in enumerate(zip(axes[:, 0], page)):
+                    _draw_panel(ax, w0, w1,
+                                first=(start + k == 0),
+                                last=(start + k == len(chunks) - 1))
                 axes[0, 0].legend(loc="upper right", fontsize=8)
-                axes[0, 0].set_title(title, fontsize=10)
+                axes[0, 0].set_title(title + ("   (grey stripes are repeated "
+                                              "on the neighbouring row)"
+                                              if share > 0 else ""),
+                                     fontsize=10)
                 axes[-1, 0].set_xlabel("Wavelength")
                 fig.tight_layout()
                 pdf.savefig(fig)
@@ -124,10 +166,13 @@ def plot_overview(result: NormalizedSpectrum, path: str,
         fig, axes = plt.subplots(len(chunks), 1,
                                  figsize=(11, 2.6 * len(chunks) + 0.8),
                                  squeeze=False)
-        for ax, (w0, w1) in zip(axes[:, 0], chunks):
-            _draw_panel(ax, w0, w1)
+        for k, (ax, (w0, w1)) in enumerate(zip(axes[:, 0], chunks)):
+            _draw_panel(ax, w0, w1, first=(k == 0),
+                        last=(k == len(chunks) - 1))
         axes[0, 0].legend(loc="upper right", fontsize=8)
-        axes[0, 0].set_title(title, fontsize=10)
+        axes[0, 0].set_title(title + ("   (grey stripes are repeated on the "
+                                      "neighbouring row)" if share > 0 else ""),
+                             fontsize=10)
         axes[-1, 0].set_xlabel("Wavelength")
         fig.tight_layout()
         fig.savefig(path, dpi=150)

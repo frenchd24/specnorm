@@ -5,10 +5,15 @@ The spectrum is split into wavelength windows (default 20 Angstroms with
 (geocoronal Ly-alpha airglow, detector gaps, ...) and place continuum
 nodes:
 
-* **m** toggles mask mode.  In mask mode, two left-clicks bracket a
-  region to mask (shaded); a right-click on a shaded region unmasks it.
-  The y-axis autoscale ignores masked points, so an airglow spike no
-  longer flattens the rest of the window.
+* **m** toggles *fit-mask* mode: two left-clicks bracket a region to
+  hide from the continuum fit (shaded orange), a right-click removes
+  the most recent one.  Fit masks keep the data in the output — use
+  them for real spectral features you do not want pulling the fit.
+* **x** toggles *exclude* mode, which works the same way (shaded red)
+  but also flags those pixels as masked in every output file — use it
+  for genuinely bad data such as geocoronal airglow.
+  The y-axis autoscale ignores both, so an airglow spike no longer
+  flattens the rest of the window.
 * **left-click** (normal mode) drops a continuum node — the node's flux
   is the median *unmasked* flux within a small box around the click;
 * **right-click** (normal mode) deletes the nearest node;
@@ -46,9 +51,9 @@ from .spectrum import Spectrum, NormalizedSpectrum
 from .fitters import BaseFitter, make_fitter
 
 HELP_TEXT = (
-    "left/right click: add/delete node   m: mask mode (two clicks = mask "
-    "region, right click = undo last mask)   u: undo node (or un-accept previous "
-    "window)   r: reset nodes\n"
+    "left/right click: add/delete node   m: fit-mask mode (hide from fit "
+    "only)   x: exclude mode (also masked in output)   u: undo node   "
+    "r: reset nodes\n"
     "f: fit   s: spline (thru nodes)   c: Chebyshev (fits data, sigma-clips "
     "lines; nodes set ref level)   1-5: degree   +/-: zoom out/in   "
     "arrows: pan window   0: reset width   enter/a: accept & next   "
@@ -120,7 +125,12 @@ class ContinuumGUI:
         If True, points with non-zero DQ are excluded from node medians
         and shown in grey.
     mask_regions : list of (w0, w1), optional
-        Regions to mask before the GUI opens (e.g. ``AIRGLOW_REGIONS``).
+        Fit-only masks applied before the GUI opens: hidden from the
+        continuum fit, but not flagged in the output.
+    exclude_regions : list of (w0, w1), optional
+        Exclusion masks applied before the GUI opens (e.g.
+        ``AIRGLOW_REGIONS``): ignored by the fit *and* flagged as
+        masked in the output.
     masked_path : str, optional
         If given, an intermediate masked-spectrum file is written here
         whenever a window is accepted and at the end of the session.
@@ -130,9 +140,10 @@ class ContinuumGUI:
     """
 
     def __init__(self, spectrum: Spectrum, window: float = 20.0,
-                 overlap: float = 0.10, fitter: str = "spline",
+                 overlap: float = 0.15, fitter: str = "spline",
                  degree: int = 3, node_box: Optional[float] = None,
                  mask_dq: bool = True, mask_regions=None,
+                 exclude_regions=None,
                  masked_path: Optional[str] = None,
                  low_rej: float = 1.5, high_rej: float = 3.5,
                  niterate: int = 20, grow: int = 6, min_pix: int = 3):
@@ -144,7 +155,9 @@ class ContinuumGUI:
         self.clip = dict(low_rej=low_rej, high_rej=high_rej,
                          niterate=niterate, grow=grow, min_pix=min_pix)
         for (m0, m1) in (mask_regions or []):
-            self.spec.mask_region(m0, m1)
+            self.spec.mask_region(m0, m1, kind="fit")
+        for (m0, m1) in (exclude_regions or []):
+            self.spec.mask_region(m0, m1, kind="exclude")
         self._refresh_good()
 
         self.overlap = float(np.clip(overlap, 0.0, 0.5))
@@ -169,7 +182,7 @@ class ContinuumGUI:
         self._fig = None
         self._ax = None
         self._finished = False
-        self._mask_mode = False
+        self._mask_mode: Optional[str] = None  # None | "fit" | "exclude"
         self._mask_start: Optional[float] = None  # first edge of pending mask
         self._ax_map = None                       # coverage strip axes
 
@@ -260,10 +273,12 @@ class ContinuumGUI:
             else:
                 w0, w1 = sorted((self._mask_start, x))
                 self._mask_start = None
-                self.spec.mask_region(w0, w1)
+                kind = self._mask_mode
+                self.spec.mask_region(w0, w1, kind=kind)
                 self._refresh_good()
                 self._invalidate_fits(w0, w1)
-                self._draw(message=f"Masked [{w0:.2f}, {w1:.2f}]")
+                label = ("fit-masked" if kind == "fit" else "EXCLUDED")
+                self._draw(message=f"{label} [{w0:.2f}, {w1:.2f}]")
         elif event.button == 3:
             # Undo: first cancel a pending first edge, otherwise remove
             # masks LIFO — most recently added first — regardless of
@@ -272,15 +287,17 @@ class ContinuumGUI:
                 self._mask_start = None
                 self._draw(message="Pending mask edge cancelled")
                 return
-            removed = self.spec.pop_mask_region()
+            kind = self._mask_mode
+            removed = self.spec.pop_mask_region(kind=kind)
             if removed is None:
-                self._draw(message="No mask regions to undo")
+                self._draw(message=f"No {kind} mask regions to undo")
                 return
             m0, m1 = removed
             self._refresh_good()
             self._invalidate_fits(m0, m1)
-            n_left = len(self.spec.meta.get("mask_regions", []))
-            self._draw(message=f"Removed mask [{m0:.2f}, {m1:.2f}] "
+            key = ("fit_mask_regions" if kind == "fit" else "exclude_regions")
+            n_left = len(self.spec.meta.get(key, []))
+            self._draw(message=f"Removed {kind} mask [{m0:.2f}, {m1:.2f}] "
                                f"({n_left} remaining)")
 
     def _invalidate_fits(self, w0: float, w1: float):
@@ -303,8 +320,9 @@ class ContinuumGUI:
         st = self.states[self.idx]
         key = (event.key or "").lower()
 
-        if key == "m":
-            self._mask_mode = not self._mask_mode
+        if key in ("m", "x"):
+            kind = "fit" if key == "m" else "exclude"
+            self._mask_mode = None if self._mask_mode == kind else kind
             self._mask_start = None
             self._draw()
         elif key == "f":
@@ -361,7 +379,7 @@ class ContinuumGUI:
                         "press b or click the coverage bar to go back")
             if self.idx + 1 < len(self.states):
                 self.idx += 1
-                self._mask_mode = False
+                self._mask_mode = None
                 self._mask_start = None
                 self._draw(message=note)
             else:
@@ -479,7 +497,7 @@ class ContinuumGUI:
         for i, s in enumerate(self.states):
             if s.w0 <= wavelength <= s.w1:
                 self.idx = i
-                self._mask_mode = False
+                self._mask_mode = None
                 self._mask_start = None
                 self._draw(message=f"Jumped to window {i + 1}")
                 return
@@ -651,6 +669,7 @@ class ContinuumGUI:
         f = self.spec.flux[sel]
         g = self.good[sel]
         masked = self.spec.mask[sel]
+        excluded = self.spec.exclude[sel]
 
         ax.plot(w[g], f[g], color="0.2", lw=0.8, drawstyle="steps-mid",
                 label="flux")
@@ -658,12 +677,21 @@ class ContinuumGUI:
         if bad.any():
             ax.plot(w[bad], f[bad], ".", color="0.75", ms=3, label="bad (DQ)")
         if masked.any():
-            ax.plot(w[masked], f[masked], color="lightcoral", lw=0.6,
-                    alpha=0.6, drawstyle="steps-mid", label="masked")
-        for (m0, m1) in self.spec.meta.get("mask_regions", []):
+            ax.plot(w[masked], f[masked], color="darkorange", lw=0.6,
+                    alpha=0.7, drawstyle="steps-mid",
+                    label="fit-masked (kept in output)")
+        if excluded.any():
+            ax.plot(w[excluded], f[excluded], color="lightcoral", lw=0.6,
+                    alpha=0.6, drawstyle="steps-mid",
+                    label="excluded (masked in output)")
+        for (m0, m1) in self.spec.meta.get("fit_mask_regions", []):
             if m1 >= st.w0 and m0 <= st.w1:
                 ax.axvspan(max(m0, st.w0), min(m1, st.w1),
-                           color="red", alpha=0.10, zorder=0)
+                           color="darkorange", alpha=0.10, zorder=0)
+        for (m0, m1) in self.spec.meta.get("exclude_regions", []):
+            if m1 >= st.w0 and m0 <= st.w1:
+                ax.axvspan(max(m0, st.w0), min(m1, st.w1),
+                           color="red", alpha=0.13, zorder=0)
         if self._mask_start is not None:
             ax.axvline(self._mask_start, color="red", ls="--", lw=1)
         if st.nodes_x:
@@ -709,7 +737,9 @@ class ContinuumGUI:
                  "cheb": f"cheb deg {st.degree} (data, clipped)",
                  }.get(st.fitter_kind, st.fitter_kind)
         n_acc = sum(s.accepted for s in self.states)
-        mode = "   *** MASK MODE ***" if self._mask_mode else ""
+        mode = ("   *** FIT-MASK MODE ***" if self._mask_mode == "fit"
+                else "   *** EXCLUDE MODE ***" if self._mask_mode == "exclude"
+                else "")
         if st.accepted:
             status = "ACCEPTED"
         elif st.fitter is not None:
@@ -749,14 +779,17 @@ class ContinuumGUI:
         ax.axhspan(0, 1, color="0.88", zorder=0)
         for (a, b) in self._covered_spans():
             ax.axvspan(a, b, color="tab:green", alpha=0.55, lw=0, zorder=1)
-        for (m0, m1) in self.spec.meta.get("mask_regions", []):
-            ax.axvspan(m0, m1, color="red", alpha=0.30, lw=0, zorder=2)
+        for (m0, m1) in self.spec.meta.get("fit_mask_regions", []):
+            ax.axvspan(m0, m1, color="darkorange", alpha=0.35, lw=0, zorder=2)
+        for (m0, m1) in self.spec.meta.get("exclude_regions", []):
+            ax.axvspan(m0, m1, color="red", alpha=0.40, lw=0, zorder=2)
         cur = self.states[self.idx]
         ax.axvspan(cur.w0, cur.w1, facecolor="none", edgecolor="k",
                    lw=1.8, zorder=3)
         n_gap = len(self._coverage_gaps())
         ax.set_xlabel(
-            "coverage: green = accepted fit, red = masked, box = current "
+            "coverage: green = accepted fit, orange = fit-masked, "
+            "red = excluded, box = current "
             f"window   ({n_gap} unfitted region{'' if n_gap == 1 else 's'} "
             "left; click to jump)", fontsize=8)
         ax.tick_params(labelsize=7)
@@ -822,15 +855,18 @@ class ContinuumGUI:
             cont = np.where(covered, cont / denom, np.nan)
             cerr = np.where(covered, cerr / denom, np.nan)
 
-        # Interactive / pre-set mask regions apply on the target grid too.
-        mask = spectrum.mask.copy()
-        regions = list(self.spec.meta.get("mask_regions", []))
-        for (m0, m1) in regions:
+        # Only *exclusions* reach the output: fit masks hide features
+        # from the continuum fit but leave the data intact for analysis.
+        exclude_regions = list(self.spec.meta.get("exclude_regions", []))
+        fit_regions = list(self.spec.meta.get("fit_mask_regions", []))
+        mask = spectrum.exclude.copy()
+        for (m0, m1) in exclude_regions:
             mask |= (wave >= m0) & (wave <= m1)
 
         meta = dict(spectrum.meta)
         meta["specnorm"] = {
-            "mask_regions": regions,
+            "fit_mask_regions": fit_regions,
+            "exclude_regions": exclude_regions,
             "binning": spectrum.meta.get("binning", 1),
             "fit_binning": self.spec.meta.get("binning", 1),
             "windows": [
@@ -847,7 +883,7 @@ class ContinuumGUI:
 
 
 def normalize_interactive(spectrum: Spectrum, window: float = 20.0,
-                          overlap: float = 0.10, fitter: str = "spline",
+                          overlap: float = 0.15, fitter: str = "spline",
                           degree: int = 3,
                           output_on: Optional[Spectrum] = None,
                           **kwargs) -> NormalizedSpectrum:

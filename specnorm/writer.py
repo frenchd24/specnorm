@@ -17,11 +17,14 @@ def write_masked(spec: Spectrum, path: str) -> str:
     """Write an intermediate masked spectrum (before/independent of fitting).
 
     Columns: WAVELENGTH, FLUX, ERROR, MASK — unified convention:
-    **0 = masked/excluded, 1 = good**.  The masked wavelength regions
-    are also recorded in the header / file comments.
+    **0 = masked/excluded, 1 = good**.  Only *exclusion* regions set
+    MASK to 0; fit-only masks hide features from the continuum fit and
+    are recorded in the header for reference but leave the data flagged
+    as good.
     """
-    mask = (~spec.mask.astype(bool)).astype(np.int16)
-    regions = spec.meta.get("mask_regions", [])
+    mask = (~spec.exclude.astype(bool)).astype(np.int16)
+    regions = spec.meta.get("exclude_regions", [])
+    fit_regions = spec.meta.get("fit_mask_regions", [])
 
     if path.lower().endswith((".fits", ".fit", ".fts")):
         from astropy.io import fits
@@ -39,14 +42,17 @@ def write_masked(spec: Spectrum, path: str) -> str:
         if "binning" in spec.meta:
             primary.header["BINNING"] = (spec.meta["binning"], "pixel binning")
         for (m0, m1) in regions:
-            primary.header.add_comment(f"masked region {m0:.3f}-{m1:.3f}")
+            primary.header.add_comment(f"excluded region {m0:.3f}-{m1:.3f}")
+        for (m0, m1) in fit_regions:
+            primary.header.add_comment(f"fit-masked region {m0:.3f}-{m1:.3f}")
         fits.HDUList([primary, table]).writeto(path, overwrite=True)
     else:
         data = np.column_stack([spec.wavelength, spec.flux, spec.error, mask])
         header = ("specnorm masked spectrum\n"
-                  + "\n".join(f"masked region {m0:.3f}-{m1:.3f}"
-                              for (m0, m1) in regions)
-                  + ("\n" if regions else "")
+                  + "".join(f"excluded region {m0:.3f}-{m1:.3f}\n"
+                            for (m0, m1) in regions)
+                  + "".join(f"fit-masked region {m0:.3f}-{m1:.3f}\n"
+                            for (m0, m1) in fit_regions)
                   + "mask convention: 0 = masked/excluded, 1 = good\n"
                   + "    WAVELENGTH             FLUX            ERROR   MASK")
         np.savetxt(path, data, fmt="%14.6f %16.8e %16.8e %6d", header=header)
@@ -113,7 +119,11 @@ def write_spectrum(result: NormalizedSpectrum, path: str,
 
 
 def _result_mask(result: NormalizedSpectrum) -> np.ndarray:
-    """Mask column, unified convention: 1 = good pixel, 0 = masked."""
+    """Mask column, unified convention: 1 = good pixel, 0 = excluded.
+
+    Fit-only masks never appear here — they exist to shape the
+    continuum fit, not to discard data.
+    """
     if result.mask is not None:
         return (~result.mask.astype(bool)).astype(np.int16)
     return np.ones(result.wavelength.size, dtype=np.int16)
@@ -208,8 +218,10 @@ def _write_fits(result: NormalizedSpectrum, path: str,
         sn = result.meta["specnorm"]
         if sn.get("binning", 1) > 1:
             primary.header["BINNING"] = (sn["binning"], "pixel binning")
-        for (m0, m1) in sn.get("mask_regions", []):
-            primary.header.add_comment(f"masked region {m0:.3f}-{m1:.3f}")
+        for (m0, m1) in sn.get("exclude_regions", []):
+            primary.header.add_comment(f"excluded region {m0:.3f}-{m1:.3f}")
+        for (m0, m1) in sn.get("fit_mask_regions", []):
+            primary.header.add_comment(f"fit-masked region {m0:.3f}-{m1:.3f}")
         for line in json.dumps(sn["windows"]).split(","):
             primary.header.add_comment(line[:70])
 

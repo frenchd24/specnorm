@@ -27,8 +27,8 @@ specnorm oc8c11020_x1d.fits --airglow -o oc8c11020_norm.fits
 ```
 
 `--airglow` pre-masks Ly-alpha (1213-1218.5), the OI triplet (1301-1307), and
-OI] 1355 before the GUI opens. Add custom regions with repeated
-`--mask W0:W1` flags. Data are binned x2 by default (`-b 1` to disable,
+OI] 1355 before the GUI opens. Add custom regions with repeated `--mask W0:W1` (fit-only) or
+`--exclude W0:W1` (also masked in the output) flags. Data are binned x2 by default (`-b 1` to disable,
 `-b N` for other factors).
 
 or from Python:
@@ -74,7 +74,8 @@ Use `--ext N` to force a specific FITS extension.
 
 | Action | Effect |
 |---|---|
-| `m` | toggle **mask mode**: two left-clicks bracket a region to mask (shaded red); right-click **undoes masks LIFO** (most recent first, cursor position irrelevant; a pending first edge is cancelled instead) |
+| `m` | toggle **fit-mask mode**: two left-clicks bracket a region to hide from the continuum fit (shaded orange); right-click **undoes LIFO** (most recent first; a pending first edge is cancelled instead) |
+| `x` | toggle **exclude mode**: same interaction (shaded red), but those pixels are also flagged as masked in the output |
 | left click | add a continuum node (flux = median of *unmasked* points in a small box around the click) |
 | right click | delete nearest node |
 | `u` | undo last node; with no nodes placed, step **back to the previous window and un-accept it** (rescues an accidental `enter`) |
@@ -136,10 +137,23 @@ message warns you if accepting leaves a gap behind, and clicking the strip
 jumps straight to any window. The whole-spectrum mode (`-w 0`) has a single
 window and disables zooming and panning.
 
-**Masking and y-scaling.** The y-axis autoscales to the *unmasked* data only,
-so a masked airglow spike no longer flattens the rest of the window. Masking a
-region drops any nodes inside it and un-accepts affected windows so they get
-refit. All mask regions are recorded in the output headers.
+**Two kinds of mask.** Both hide pixels from the continuum fit, from node
+placement and from the y-axis autoscale (so a masked airglow spike no longer
+flattens the window), but they differ in what reaches the output:
+
+- **Fit masks** (`m`, `--mask W0:W1`) shape the fit only. Use them for *real
+  spectral features* — absorption lines, damped troughs — that you do not
+  want dragging the continuum down. The data are written out unflagged
+  (`MASK = 1`) and remain fully available for later analysis.
+- **Exclusions** (`x`, `--exclude W0:W1`) are for *genuinely bad data* —
+  geocoronal airglow, detector artefacts. These are ignored by the fit *and*
+  written with `MASK = 0` in every output file, so downstream tools skip
+  them. `--airglow` adds its regions as exclusions, since airglow-filled
+  pixels are contamination rather than signal.
+
+Masking a region drops any nodes inside it and un-accepts affected windows so
+they get refit. Both region lists are recorded in the output headers, and the
+coverage strip shows fit masks in orange and exclusions in red.
 
 The model menu per window offers two genuinely different philosophies:
 
@@ -176,7 +190,7 @@ The model menu per window offers two genuinely different philosophies:
 
 `--window` sets the width of each fitting window in wavelength units (default
 20 Å, suited to medium/high-resolution STIS/COS data; use `0` to fit the whole
-spectrum at once). Consecutive windows overlap by `--overlap` (default 10%), and accepted
+spectrum at once). Consecutive windows overlap by `--overlap` (default 15%), and accepted
 continua are combined with linear ramp weights across the overlaps, so there
 are no jumps at window boundaries.
 
@@ -238,9 +252,12 @@ By default the CLI saves an overview figure next to the output
 (`<output>_overview.pdf`) showing the data and the fitted continuum
 together, with masked regions shaded. The spectrum is split into panels of
 **3x the fitting-window width** (so `-w 20` gives 60 A panels), up to four
-panels per PDF page. Tune the panel width with `--overview-zoom` (a
-multiplier of the window width) or skip the plot with `--no-overview`.
-From Python: `plot_overview(result, "overview.pdf", zoom=3.0)` — a `.png`
+panels per PDF page. Consecutive panels **overlap by 15%** and the shared
+stretch is tinted grey in both rows with a dotted boundary, so you can see
+how the right edge of one row joins the left edge of the next. Tune the
+panel width with `--overview-zoom`, the repeat with `--overview-overlap`, or
+skip the plot with `--no-overview`. From Python:
+`plot_overview(result, "overview.pdf", zoom=3.0, overlap=0.15)` — a `.png`
 path gives a single tall figure instead of a paged PDF.
 
 ### Intermediate masked file
