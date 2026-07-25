@@ -27,7 +27,7 @@ from .fitters import SplineFitter, PolynomialFitter, ChebyshevFitter, make_fitte
 from .gui import ContinuumGUI, normalize_interactive, AIRGLOW_REGIONS
 from .plotting import plot_overview
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"
 
 __all__ = [
     "Spectrum",

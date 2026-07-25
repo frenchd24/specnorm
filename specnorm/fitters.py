@@ -75,6 +75,18 @@ class BaseFitter:
         """1-sigma uncertainty of the continuum, or None if unavailable."""
         return None
 
+    @property
+    def support(self):
+        """(min, max) wavelength over which the fit is constrained.
+
+        Beyond this range the model is extrapolating, which is where
+        high-order fits characteristically run away.  Returns None if
+        unknown.
+        """
+        if self.nodes_x is None or self.nodes_x.size == 0:
+            return None
+        return (float(self.nodes_x.min()), float(self.nodes_x.max()))
+
     def _fit_impl(self, x, y):  # pragma: no cover - abstract
         raise NotImplementedError
 
@@ -336,6 +348,13 @@ class ChebyshevFitter(BaseFitter):
         except np.linalg.LinAlgError:
             pass
         return self
+
+    @property
+    def support(self):
+        dom = getattr(self, "_domain", None)
+        if dom is not None:
+            return (float(dom[0]), float(dom[1]))
+        return super().support
 
     def uncertainty(self, wave):
         if self._cov is None:

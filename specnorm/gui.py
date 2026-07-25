@@ -85,6 +85,7 @@ class WindowState:
     rejected: Optional[np.ndarray] = None   # sigma-clipped pixels (window sel)
     resized: bool = False                   # width changed from its tile
     accepted: bool = False
+    accept_seq: int = -1                    # order of acceptance (recency)
 
 
 def _build_windows(wmin: float, wmax: float, window: float, overlap_frac: float):
@@ -182,6 +183,11 @@ class ContinuumGUI:
         self._fig = None
         self._ax = None
         self._finished = False
+        self._accept_seq = 0
+        # In an overlap the more recently accepted fit dominates by this
+        # factor per generation, so re-fitting a region supersedes what
+        # was there before without a discontinuity.
+        self.recency_base = 4.0
         self._mask_mode: Optional[str] = None  # None | "fit" | "exclude"
         self._mask_start: Optional[float] = None  # first edge of pending mask
         self._ax_map = None                       # coverage strip axes
@@ -365,6 +371,10 @@ class ContinuumGUI:
             if st.fitter is None:
                 return  # fit failed; message already shown
             st.accepted = True
+            st.accept_seq = self._accept_seq
+            self._accept_seq += 1
+            self._knit_accepted()
+            st = self.states[self.idx]      # knitting may reorder the list
             if st.resized:
                 # Zooming or panning changed this window's span, so
                 # re-tile the remaining spectrum from its right edge.
@@ -421,6 +431,23 @@ class ContinuumGUI:
         previous model is kept rather than leaving the window blank.
         """
         st = self.states[self.idx]
+        if st.accepted and st.fitter is not None:
+            # This window's fit was already accepted over its old span.
+            # Detach it as a window of its own so re-fitting a smaller
+            # (or shifted) region does not wipe out coverage that was
+            # already agreed; knitting will trim it once the new fit is
+            # accepted.
+            preserved = WindowState(
+                w0=st.w0, w1=st.w1, nodes_x=list(st.nodes_x),
+                nodes_y=list(st.nodes_y), nodes_e=list(st.nodes_e),
+                fitter_kind=st.fitter_kind, degree=st.degree,
+                continuum=None, cont_err=None, fitter=st.fitter,
+                resized=True, accepted=True, accept_seq=st.accept_seq)
+            st.accepted = False
+            st.accept_seq = -1
+            self.states.append(preserved)
+            self.states.sort(key=lambda s: (s.w0, s.w1))
+            self.idx = next(i for i, s in enumerate(self.states) if s is st)
         st.w0, st.w1 = w0, w1
         st.resized = True
         st.continuum = st.cont_err = None
@@ -527,6 +554,58 @@ class ContinuumGUI:
             gaps.append((cursor, limit))
         tol = 1e-6 * max(self.spec.wmax - self.spec.wmin, 1.0)
         return [(a, b) for (a, b) in gaps if b - a > tol]
+
+    def _knit_accepted(self):
+        """Fit the newly accepted window in among the existing ones.
+
+        The window just accepted takes precedence over anything it
+        overlaps: older accepted fits are *trimmed back* to its edge
+        (keeping a blend zone so the join stays smooth) rather than
+        being thrown away, an older fit that spanned right across the
+        new one is split into the parts either side, and windows the
+        new fit completely covers are retired.  Nothing else loses its
+        work.
+        """
+        cur = self.states[self.idx]
+        blend = (self.overlap * self.default_window
+                 if self.default_window > 0 else 0.0)
+        survivors = []
+        retired = 0
+        for s in self.states:
+            if s is cur:
+                survivors.append(s)
+                continue
+            has_work = s.accepted or s.fitter is not None
+            # Anything the new window swallows whole is redundant.
+            if s.w0 >= cur.w0 and s.w1 <= cur.w1:
+                retired += 1
+                continue
+            if not has_work:
+                survivors.append(s)
+                continue
+            if s.w0 < cur.w0 and s.w1 > cur.w1:
+                # The old fit spans across the new one: keep both wings.
+                right = WindowState(
+                    w0=max(cur.w1 - blend, cur.w1 - 0.5 * (s.w1 - cur.w1)),
+                    w1=s.w1, nodes_x=list(s.nodes_x), nodes_y=list(s.nodes_y),
+                    nodes_e=list(s.nodes_e), fitter_kind=s.fitter_kind,
+                    degree=s.degree, fitter=s.fitter, resized=True,
+                    accepted=s.accepted, accept_seq=s.accept_seq)
+                s.w1 = min(cur.w0 + blend, s.w1)
+                survivors.append(s)
+                survivors.append(right)
+                continue
+            if s.w0 < cur.w0 < s.w1:          # old fit laps in from the left
+                s.w1 = max(min(s.w1, cur.w0 + blend), s.w0)
+            elif s.w0 < cur.w1 < s.w1:        # old fit laps in from the right
+                s.w0 = min(max(s.w0, cur.w1 - blend), s.w1)
+            survivors.append(s)
+
+        survivors.sort(key=lambda s: (s.w0, s.w1))
+        self.states = survivors
+        self.idx = next(i for i, s in enumerate(survivors) if s is cur)
+        if retired:
+            self._retired_note = retired
 
     def _retile_tail(self):
         """Rebuild the windows after the current one from its right edge.
@@ -806,27 +885,79 @@ class ContinuumGUI:
         except Exception as exc:  # don't let I/O kill the session
             print(f"Warning: could not write masked file: {exc}")
 
+    def _reference_level(self, spectrum: Spectrum) -> np.ndarray:
+        """Robust local flux level, used to judge competing fits.
+
+        A high percentile of the good flux in coarse bands, interpolated
+        onto the pixel grid: close to the continuum where there is one,
+        and — crucially — never wild, so it can act as a sanity anchor
+        when two overlapping fits disagree.
+        """
+        wave, flux = spectrum.wavelength, spectrum.flux
+        good = np.isfinite(flux) & ~spectrum.exclude.astype(bool)
+        width = (self.default_window if self.default_window > 0
+                 else max((wave[-1] - wave[0]) / 10.0, 1e-30))
+        nbin = max(int(np.ceil((wave[-1] - wave[0]) / width)), 1)
+        edges = np.linspace(wave[0], wave[-1], nbin + 1)
+        centres, levels = [], []
+        for i in range(nbin):
+            sel = (wave >= edges[i]) & (wave <= edges[i + 1]) & good
+            if int(sel.sum()) >= 3:
+                centres.append(0.5 * (edges[i] + edges[i + 1]))
+                levels.append(float(np.percentile(flux[sel], 80)))
+        if not centres:
+            fallback = float(np.nanmedian(flux[good])) if good.any() else 1.0
+            if not np.isfinite(fallback) or fallback <= 0:
+                fallback = 1.0
+            return np.full(wave.size, fallback)
+        ref = np.interp(wave, centres, levels)
+        positive = ref[ref > 0]
+        floor = (float(np.median(positive)) * 1e-3 if positive.size else 1e-30)
+        return np.maximum(ref, max(floor, 1e-30))
+
+    @staticmethod
+    def _support_weight(st: WindowState, w: np.ndarray) -> np.ndarray:
+        """Down-weight a fit where it is extrapolating past its nodes/data."""
+        support = st.fitter.support if st.fitter is not None else None
+        if support is None:
+            support = (st.w0, st.w1)
+        s0, s1 = support
+        beyond = np.maximum(np.maximum(s0 - w, w - s1), 0.0)
+        span = max(s1 - s0, 1e-30)
+        return 1.0 / (1.0 + (beyond / (0.25 * span)) ** 2)
+
     def _assemble(self) -> NormalizedSpectrum:
         return self.assemble_on(self.spec)
 
     def assemble_on(self, spectrum: Spectrum) -> NormalizedSpectrum:
-        """Evaluate the accepted continuum fits on an arbitrary spectrum.
+        """Evaluate and knit the accepted continuum fits onto a spectrum.
 
-        This is how native-resolution output is produced when the fit
-        was done on binned data: the fitted models themselves are
+        This is also how native-resolution output is produced when the
+        fit was done on binned data: the fitted models themselves are
         re-evaluated on the target wavelength grid (exact — no
-        interpolation of binned arrays), blended with the same ramp
-        weights, and the interactive mask regions are re-applied to the
-        target pixels.
+        interpolation of binned arrays).
+
+        Where windows overlap the fits are combined with weights built
+        from three factors:
+
+        * an **edge taper**, so joins are smooth rather than stepped;
+        * **recency** — a fit accepted later dominates one accepted
+          earlier, so re-fitting a region supersedes what was there;
+        * **reliability** — a fit is down-weighted where it extrapolates
+          beyond its own nodes, and where it strays much further from
+          the local flux level than a competing fit does.  This is what
+          stops a high-order fit that runs away at its edge from
+          dragging the knitted continuum with it.
         """
         wave = spectrum.wavelength
         cont = np.zeros_like(wave)
         cerr = np.zeros_like(wave)
         weight = np.zeros_like(wave)
 
-        for st in self.states:
-            if not st.accepted or st.fitter is None:
-                continue
+        accepted = [st for st in self.states
+                    if st.accepted and st.fitter is not None]
+        pieces = []
+        for st in accepted:
             sel = (wave >= st.w0) & (wave <= st.w1)
             # Binned fitting grids start/end inside the native range
             # (bin centers), so windows touching the ends of the
@@ -838,16 +969,42 @@ class ContinuumGUI:
             if not sel.any():
                 continue
             w = wave[sel]
-            c = st.fitter(w)
-            e = st.fitter.uncertainty(w)
-            # Linear ramp weights -> smooth blending in overlap regions.
-            span = max(st.w1 - st.w0, 1e-30)
-            ramp = np.clip(np.minimum(w - st.w0, st.w1 - w) / span,
-                           0.0, None) + 1e-3
-            cont[sel] += c * ramp
-            if e is not None:
-                cerr[sel] += np.nan_to_num(e) * ramp
-            weight[sel] += ramp
+            pieces.append((st, sel, w, st.fitter(w), st.fitter.uncertainty(w)))
+
+        if pieces:
+            ref = self._reference_level(spectrum)
+            # Newest acceptance covering each pixel, and the closest any
+            # candidate there comes to the local flux level.
+            newest = np.full(wave.size, -np.inf)
+            best_dev = np.full(wave.size, np.inf)
+            for (st, sel, w, c, _e) in pieces:
+                newest[sel] = np.maximum(newest[sel], st.accept_seq)
+                dev = np.abs(c - ref[sel])
+                best_dev[sel] = np.minimum(best_dev[sel], dev)
+
+            for (st, sel, w, c, e) in pieces:
+                span = max(st.w1 - st.w0, 1e-30)
+                # A small floor keeps a fit from being defenceless at its
+                # own edge, where its taper would otherwise vanish and a
+                # diverging neighbour could win by default.
+                taper = np.clip(np.minimum(w - st.w0, st.w1 - w) / span,
+                                0.0, None) + 0.02
+                recency = self.recency_base ** -(newest[sel] - st.accept_seq)
+                # How much further than the best available candidate this
+                # fit strays from the local flux level, in units of that
+                # level: 0 for the closest fit, large for a runaway one.
+                excess = (np.abs(c - ref[sel]) - best_dev[sel]) / ref[sel]
+                # Quartic so a fit that has run away by orders of
+                # magnitude is suppressed decisively, while a fit that
+                # merely differs a little is barely touched.
+                agreement = 1.0 / (1.0 + np.maximum(excess, 0.0) ** 2) ** 2
+                reliability = np.maximum(
+                    self._support_weight(st, w) * agreement, 1e-6)
+                wgt = taper * recency * reliability
+                cont[sel] += c * wgt
+                if e is not None:
+                    cerr[sel] += np.nan_to_num(e) * wgt
+                weight[sel] += wgt
 
         covered = weight > 0
         with np.errstate(invalid="ignore"):

@@ -127,6 +127,29 @@ one that cannot be fitted with the nodes available — say pressing `5` with
 three nodes placed — reverts to the previous model rather than discarding
 your fit.
 
+**Knitting.** Accepting a window fits it in among the ones already there
+rather than competing with them. The window you just accepted takes
+precedence over anything it overlaps: older accepted fits are *trimmed back*
+to its edge — keeping a blend zone so the join stays smooth — an older fit
+that spanned right across it is split into the parts either side, and only
+windows it completely covers are retired. Going back to re-fit a region
+therefore never destroys the neighbouring work, and zooming into an
+already-accepted window preserves its surrounding coverage as separate
+wings.
+
+Where fits do overlap, they are combined with weights built from three
+factors: an edge taper (so joins are smooth), **recency** (a fit accepted
+later dominates one accepted earlier, so a re-fit supersedes what was
+there), and **reliability**. The last one guards against a failure mode of
+high-order fits: a polynomial or Chebyshev series can run away at the edge
+of its window, and if that edge overlaps a neighbour it would otherwise drag
+the knitted continuum with it. A fit is therefore down-weighted where it
+extrapolates beyond its own nodes or fitted pixels, and where it strays much
+further from the local flux level than a competing fit does — so in an
+overlap the fit that stays closer to the data wins. In testing, a degree-5
+fit diverging to −142x the continuum level is suppressed to leave the
+knitted result within 0.03% of the true continuum.
+
 When you accept a window whose span you changed, the rest of the spectrum
 re-tiles at the default width from its right edge, preserving any downstream
 windows you had already fitted. Because zooming and panning can leave a
