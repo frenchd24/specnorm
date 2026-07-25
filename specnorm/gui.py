@@ -12,6 +12,13 @@ nodes:
 * **left-click** (normal mode) drops a continuum node — the node's flux
   is the median *unmasked* flux within a small box around the click;
 * **right-click** (normal mode) deletes the nearest node;
+* **+** / **-** zoom the window out / in (geometrically, about its
+  centre), and the **left/right arrows** pan it while keeping its width;
+  **0** restores the default width.  Zooming out across a broad damped
+  feature (Galactic Ly-alpha at 1215 A) lets a single fit bridge it;
+* a coverage strip under the plot shows which parts of the spectrum
+  already have accepted fits (green), which are masked (red), and where
+  the current window sits; click it to jump to any window;
 * **f** (re)fits and overplots the continuum;
 * **s** / **c** / **1-5** switch model: spline, Chebyshev, or polynomial
   of that degree;
@@ -43,7 +50,8 @@ HELP_TEXT = (
     "region, right click = undo last mask)   u: undo node (or un-accept previous "
     "window)   r: reset nodes\n"
     "f: fit   s: spline (thru nodes)   c: Chebyshev (fits data, sigma-clips "
-    "lines; nodes set ref level)   1-5: degree   enter/a: accept & next   "
+    "lines; nodes set ref level)   1-5: degree   +/-: zoom out/in   "
+    "arrows: pan window   0: reset width   enter/a: accept & next   "
     "b: back   q: quit & save"
 )
 
@@ -70,6 +78,7 @@ class WindowState:
     cont_err: Optional[np.ndarray] = None   # 1-sigma continuum uncertainty
     fitter: Optional[BaseFitter] = None     # the fitted model itself
     rejected: Optional[np.ndarray] = None   # sigma-clipped pixels (window sel)
+    resized: bool = False                   # width changed from its tile
     accepted: bool = False
 
 
@@ -138,19 +147,39 @@ class ContinuumGUI:
             self.spec.mask_region(m0, m1)
         self._refresh_good()
 
+        self.overlap = float(np.clip(overlap, 0.0, 0.5))
+        self.default_window = float(window)
+        self.init_fitter = fitter
+        self.init_degree = degree
         self.window_edges = _build_windows(spectrum.wmin, spectrum.wmax,
-                                           window, np.clip(overlap, 0.0, 0.5))
+                                           window, self.overlap)
         self.states = [WindowState(w0, w1, fitter_kind=fitter, degree=degree)
                        for (w0, w1) in self.window_edges]
         self.idx = 0
         width = self.window_edges[0][1] - self.window_edges[0][0]
         self.node_box = node_box if node_box is not None else 0.005 * width
+        # Zoom is geometric: each press scales the width by this factor,
+        # so zooming in always works (a fixed step could never shrink a
+        # default-width window) and zooming out accelerates sensibly.
+        self.zoom_factor = 1.5
+        self.pan_frac = 0.25   # pan step as a fraction of current width
+        self.min_window = max(5 * self.node_box,
+                              0.05 * self.default_window)
 
         self._fig = None
         self._ax = None
         self._finished = False
         self._mask_mode = False
         self._mask_start: Optional[float] = None  # first edge of pending mask
+        self._ax_map = None                       # coverage strip axes
+
+    @staticmethod
+    def _clear_fit(st: WindowState):
+        """Discard a window's fit (it is stale, e.g. nodes changed)."""
+        st.continuum = None
+        st.cont_err = None
+        st.rejected = None
+        st.fitter = None
 
     def _refresh_good(self):
         self.good = self.spec.good_mask(use_dq=self.mask_dq, use_mask=True)
@@ -162,9 +191,11 @@ class ContinuumGUI:
         """Open the interactive figure; blocks until the user finishes."""
         import matplotlib.pyplot as plt
 
-        self._fig, self._ax = plt.subplots(figsize=(12, 6))
+        self._fig, (self._ax, self._ax_map) = plt.subplots(
+            2, 1, figsize=(12, 6.6),
+            gridspec_kw={"height_ratios": [14, 1], "hspace": 0.45})
         self._fig.canvas.manager.set_window_title("specnorm — continuum fitting")
-        self._fig.subplots_adjust(bottom=0.18)
+        self._fig.subplots_adjust(bottom=0.20)
         # Disable matplotlib's default key bindings (s=save, f=fullscreen,
         # q=quit, c=back, r=home, ...) which collide with ours.
         try:
@@ -183,7 +214,12 @@ class ContinuumGUI:
     # Event handling
     # ------------------------------------------------------------------
     def _on_click(self, event):
-        if event.inaxes is not self._ax or self._finished:
+        if self._finished:
+            return
+        if event.inaxes is self._ax_map and event.xdata is not None:
+            self._jump_to(float(event.xdata))
+            return
+        if event.inaxes is not self._ax:
             return
         # Ignore clicks while zoom/pan tools are active.
         toolbar = getattr(self._fig.canvas, "toolbar", None)
@@ -203,8 +239,7 @@ class ContinuumGUI:
                 st.nodes_x.append(float(event.xdata))
                 st.nodes_y.append(float(sample[0]))
                 st.nodes_e.append(float(sample[1]))
-                st.continuum = None
-                st.rejected = None
+                self._clear_fit(st)
                 self._draw()
             else:
                 self._draw(message="No unmasked data near that click")
@@ -213,8 +248,7 @@ class ContinuumGUI:
             st.nodes_x.pop(i)
             st.nodes_y.pop(i)
             st.nodes_e.pop(i)
-            st.continuum = None
-            st.rejected = None
+            self._clear_fit(st)
             self._draw()
 
     def _mask_click(self, event):
@@ -259,9 +293,7 @@ class ContinuumGUI:
                 st.nodes_x = [st.nodes_x[i] for i in keep]
                 st.nodes_y = [st.nodes_y[i] for i in keep]
                 st.nodes_e = [st.nodes_e[i] for i in keep]
-            st.continuum = None
-            st.cont_err = None
-            st.rejected = None
+            self._clear_fit(st)
             st.accepted = False
 
     def _on_key(self, event):
@@ -278,23 +310,20 @@ class ContinuumGUI:
         elif key == "f":
             self._fit_current()
         elif key == "s":
-            st.fitter_kind = "spline"
-            self._fit_current(quiet=True)
+            self._switch_model(st, "spline", st.degree)
         elif key == "c":
-            st.fitter_kind = "cheb"
-            self._fit_current(quiet=True)
+            self._switch_model(st, "cheb", st.degree)
         elif key in "12345":
-            if st.fitter_kind == "spline":
-                st.fitter_kind = "poly"  # spline has no degree; switch
-            st.degree = int(key)
-            self._fit_current(quiet=True)
+            # Digits set the degree of the current model; a spline has
+            # no degree, so it becomes a polynomial.
+            kind = "poly" if st.fitter_kind == "spline" else st.fitter_kind
+            self._switch_model(st, kind, int(key))
         elif key == "u":
             if st.nodes_x:
                 st.nodes_x.pop()
                 st.nodes_y.pop()
                 st.nodes_e.pop()
-                st.continuum = None
-                st.rejected = None
+                self._clear_fit(st)
                 self._draw()
             elif self.idx > 0:
                 # Nothing to undo here: step back to the previous window
@@ -310,24 +339,44 @@ class ContinuumGUI:
             st.nodes_x.clear()
             st.nodes_y.clear()
             st.nodes_e.clear()
-            st.continuum = None
-            st.rejected = None
+            self._clear_fit(st)
             self._draw()
         elif key in ("enter", "a"):
-            if st.continuum is None:
+            if st.fitter is None:
                 self._fit_current()
-            if st.continuum is None:
+            if st.fitter is None:
                 return  # fit failed; message already shown
             st.accepted = True
+            if st.resized:
+                # Zooming or panning changed this window's span, so
+                # re-tile the remaining spectrum from its right edge.
+                self._retile_tail()
             self._write_masked()
+            # Warn if adjusting the window left an unfitted gap behind.
+            behind = self._coverage_gaps(upto=st.w1)
+            note = ""
+            if behind:
+                a, b = behind[0]
+                note = (f"Gap left unfitted at [{a:.1f}, {b:.1f}] — "
+                        "press b or click the coverage bar to go back")
             if self.idx + 1 < len(self.states):
                 self.idx += 1
                 self._mask_mode = False
                 self._mask_start = None
-                self._draw()
+                self._draw(message=note)
             else:
                 self._finished = True
                 plt.close(self._fig)
+        elif key in ("+", "="):
+            self._resize_window(+1)
+        elif key in ("-", "_"):
+            self._resize_window(-1)
+        elif key == "left":
+            self._pan_window(-1)
+        elif key == "right":
+            self._pan_window(+1)
+        elif key == "0":
+            self._reset_window()
         elif key == "b" and self.idx > 0:
             self.idx -= 1
             self._draw()
@@ -340,6 +389,170 @@ class ContinuumGUI:
     # ------------------------------------------------------------------
     def _window_sel(self, st: WindowState) -> np.ndarray:
         return (self.spec.wavelength >= st.w0) & (self.spec.wavelength <= st.w1)
+
+    # ------------------------------------------------------------------
+    # Window resizing (zoom out across broad features, then back in)
+    # ------------------------------------------------------------------
+    def _reshape_window(self, w0: float, w1: float, note: str):
+        """Apply a new window span, keeping the fit visible.
+
+        The fitted model is retained (it is defined by the nodes, not
+        the view), so the continuum is simply re-evaluated over the new
+        span.  Data-driven models (sigma-clipped Chebyshev) are refit
+        because their input pixels changed; if that refit fails the
+        previous model is kept rather than leaving the window blank.
+        """
+        st = self.states[self.idx]
+        st.w0, st.w1 = w0, w1
+        st.resized = True
+        st.continuum = st.cont_err = None
+        st.rejected = None
+        if st.fitter is not None and getattr(st.fitter, "fits_data", False):
+            previous = st.fitter
+            self._fit_current(quiet=True)
+            if st.fitter is None:          # refit failed: keep the old one
+                st.fitter = previous
+        self._draw(message=note)
+
+    def _resize_window(self, direction: int):
+        """Zoom the current window out (direction>0) or in (direction<0).
+
+        Zooming is geometric about the window centre, so repeated
+        presses scale smoothly and zooming in always works.
+        """
+        if self.default_window <= 0:
+            self._draw(message="Zoom is unavailable when fitting the "
+                               "whole spectrum at once (-w 0)")
+            return
+        st = self.states[self.idx]
+        factor = self.zoom_factor if direction > 0 else 1.0 / self.zoom_factor
+        centre = 0.5 * (st.w0 + st.w1)
+        half = 0.5 * (st.w1 - st.w0) * factor
+        new_w0 = max(centre - half, self.spec.wmin)
+        new_w1 = min(centre + half, self.spec.wmax)
+        if direction < 0 and new_w1 - new_w0 < self.min_window:
+            self._draw(message=f"Minimum window width is "
+                               f"{self.min_window:.2f}")
+            return
+        if (new_w0, new_w1) == (st.w0, st.w1):
+            self._draw(message="Already showing the full spectrum")
+            return
+        self._reshape_window(new_w0, new_w1,
+                             f"Window width {new_w1 - new_w0:.2f}")
+
+    def _pan_window(self, direction: int):
+        """Shift the window left (direction<0) or right (direction>0).
+
+        The width is preserved; the shift is a fraction of the current
+        width per press, clamped to the spectrum bounds.
+        """
+        if self.default_window <= 0:
+            return
+        st = self.states[self.idx]
+        width = st.w1 - st.w0
+        shift = direction * self.pan_frac * width
+        new_w0 = st.w0 + shift
+        new_w1 = st.w1 + shift
+        if new_w0 < self.spec.wmin:
+            new_w0, new_w1 = self.spec.wmin, self.spec.wmin + width
+        if new_w1 > self.spec.wmax:
+            new_w0, new_w1 = self.spec.wmax - width, self.spec.wmax
+        if abs(new_w0 - st.w0) < 1e-12:
+            self._draw(message="At the edge of the spectrum")
+            return
+        self._reshape_window(new_w0, new_w1,
+                             f"Window [{new_w0:.2f}, {new_w1:.2f}]")
+
+    def _reset_window(self):
+        """Restore the current window to the default width (recentred)."""
+        if self.default_window <= 0:
+            return
+        st = self.states[self.idx]
+        centre = 0.5 * (st.w0 + st.w1)
+        half = 0.5 * self.default_window
+        self._reshape_window(max(centre - half, self.spec.wmin),
+                             min(centre + half, self.spec.wmax),
+                             "Window reset to default width")
+
+    def _jump_to(self, wavelength: float):
+        """Navigate to the window containing a wavelength (map click)."""
+        for i, s in enumerate(self.states):
+            if s.w0 <= wavelength <= s.w1:
+                self.idx = i
+                self._mask_mode = False
+                self._mask_start = None
+                self._draw(message=f"Jumped to window {i + 1}")
+                return
+        nearest = int(np.argmin([min(abs(s.w0 - wavelength),
+                                     abs(s.w1 - wavelength))
+                                 for s in self.states]))
+        self.idx = nearest
+        self._draw(message=f"Jumped to nearest window {nearest + 1}")
+
+    def _covered_spans(self):
+        """Sorted (w0, w1) spans of windows with an accepted fit."""
+        return sorted((s.w0, s.w1) for s in self.states
+                      if s.accepted and s.fitter is not None)
+
+    def _coverage_gaps(self, upto: Optional[float] = None):
+        """Wavelength ranges with no accepted fit, below ``upto``."""
+        limit = self.spec.wmax if upto is None else upto
+        gaps = []
+        cursor = self.spec.wmin
+        for (a, b) in self._covered_spans():
+            if a > cursor:
+                gaps.append((cursor, min(a, limit)))
+            cursor = max(cursor, b)
+            if cursor >= limit:
+                break
+        if cursor < limit:
+            gaps.append((cursor, limit))
+        tol = 1e-6 * max(self.spec.wmax - self.spec.wmin, 1.0)
+        return [(a, b) for (a, b) in gaps if b - a > tol]
+
+    def _retile_tail(self):
+        """Rebuild the windows after the current one from its right edge.
+
+        Called when an adjusted (zoomed or panned) window is accepted so
+        the rest of the spectrum is tiled at the default width with no
+        gap.  Downstream windows that already carry work (a fit or an
+        acceptance) and lie beyond the accepted span are preserved; only
+        the region they do not cover is re-tiled.
+        """
+        cur = self.states[self.idx]
+        if self.default_window <= 0:
+            return
+        step_back = self.overlap * self.default_window
+        kept = [s for s in self.states[self.idx + 1:]
+                if (s.accepted or s.fitter is not None) and s.w1 > cur.w1]
+        kept.sort(key=lambda s: s.w0)
+
+        # Walk left to right, tiling every stretch not covered by a
+        # preserved window, then everything past the last one.
+        sliver = 0.1 * self.default_window
+        tail = []
+        cursor = cur.w1 - step_back
+        for s in kept:
+            gap = s.w0 - cursor
+            if gap > sliver:
+                tail += [WindowState(w0, w1, fitter_kind=self.init_fitter,
+                                     degree=self.init_degree)
+                         for (w0, w1) in _build_windows(
+                             cursor, s.w0, self.default_window, self.overlap)]
+            elif gap > 0:
+                # Too small for its own window: let the preserved one
+                # start earlier rather than leave a sliver uncovered.
+                s.w0 = cursor
+            tail.append(s)
+            cursor = max(cursor, s.w1 - step_back)
+        if self.spec.wmax - cursor > sliver:
+            tail += [WindowState(w0, w1, fitter_kind=self.init_fitter,
+                                 degree=self.init_degree)
+                     for (w0, w1) in _build_windows(
+                         cursor, self.spec.wmax, self.default_window,
+                         self.overlap)]
+        tail.sort(key=lambda s: s.w0)
+        self.states[self.idx + 1:] = tail
 
     def _node_sample(self, x: float):
         """Return (median flux, 1-sigma uncertainty) near x, or None."""
@@ -369,6 +582,23 @@ class ContinuumGUI:
     def _make_fitter(self, st: WindowState) -> BaseFitter:
         return make_fitter(st.fitter_kind, st.degree, **self.clip)
 
+    def _switch_model(self, st: WindowState, kind: str, degree: int):
+        """Change this window's model, reverting if the new one can't fit.
+
+        Losing a good fit to a mistyped key would be unkind, so if the
+        requested model cannot be fitted with the nodes available the
+        previous model and its fit are restored.
+        """
+        prev = (st.fitter_kind, st.degree, st.fitter, st.continuum,
+                st.cont_err, st.rejected)
+        st.fitter_kind, st.degree = kind, degree
+        self._fit_current(quiet=True)
+        if st.fitter is None and prev[2] is not None:
+            (st.fitter_kind, st.degree, st.fitter, st.continuum,
+             st.cont_err, st.rejected) = prev
+            self._draw(message=f"Kept {prev[2].label()} — "
+                               f"not enough nodes for the requested model")
+
     def _fit_current(self, quiet: bool = False):
         st = self.states[self.idx]
         fitter = self._make_fitter(st)
@@ -384,6 +614,7 @@ class ContinuumGUI:
                 use &= (self.spec.wavelength >= x0) & (self.spec.wavelength <= x1)
             n_use = int(use.sum())
             if n_use < st.degree + 2:
+                self._clear_fit(st)
                 self._draw(message=f"Need >= {st.degree + 2} unmasked points "
                                    f"for {fitter.label()} ({n_use} available)")
                 return
@@ -402,6 +633,7 @@ class ContinuumGUI:
             st.rejected = rejected_global[sel]
         else:
             if len(st.nodes_x) < fitter.min_nodes:
+                self._clear_fit(st)
                 self._draw(message=f"Need >= {fitter.min_nodes} nodes for "
                                    f"{fitter.label()} ({len(st.nodes_x)} placed)")
                 return
@@ -437,6 +669,13 @@ class ContinuumGUI:
         if st.nodes_x:
             ax.plot(st.nodes_x, st.nodes_y, "o", color="tab:red", ms=8,
                     mec="k", zorder=5, label="nodes")
+        # Evaluate the fit from the stored model so it stays visible
+        # after zooming, panning or navigating between windows.
+        if st.fitter is not None and w.size:
+            st.continuum = st.fitter(w)
+            st.cont_err = st.fitter.uncertainty(w)
+        elif st.continuum is not None and st.continuum.size != w.size:
+            st.continuum = st.cont_err = None
         if st.continuum is not None:
             ax.plot(w, st.continuum, color="tab:blue", lw=2, zorder=4,
                     label="continuum")
@@ -450,7 +689,7 @@ class ContinuumGUI:
                 ax.fill_between(w, lo_b, hi_b, color="tab:blue",
                                 alpha=0.12, zorder=3)
         if st.continuum is not None and st.rejected is not None \
-                and st.rejected.any():
+                and st.rejected.size == w.size and st.rejected.any():
             ax.plot(w[st.rejected], f[st.rejected], "x", color="tab:orange",
                     ms=4, zorder=3,
                     label=f"clipped ({int(st.rejected.sum())})")
@@ -471,10 +710,18 @@ class ContinuumGUI:
                  }.get(st.fitter_kind, st.fitter_kind)
         n_acc = sum(s.accepted for s in self.states)
         mode = "   *** MASK MODE ***" if self._mask_mode else ""
+        if st.accepted:
+            status = "ACCEPTED"
+        elif st.fitter is not None:
+            status = "fitted, not accepted"
+        else:
+            status = "no fit yet"
         ax.set_title(f"Window {self.idx + 1}/{len(self.states)}   "
-                     f"[{st.w0:.1f}–{st.w1:.1f}]   model: {model}   "
+                     f"[{st.w0:.1f}–{st.w1:.1f}]  ({st.w1 - st.w0:.1f} wide)   "
+                     f"model: {model}   [{status}]   "
                      f"accepted: {n_acc}/{len(self.states)}{mode}",
-                     color="crimson" if self._mask_mode else "black")
+                     color=("crimson" if self._mask_mode
+                            else "darkgreen" if st.accepted else "black"))
         ax.set_xlabel("Wavelength")
         ax.set_ylabel("Flux")
         if message:
@@ -486,7 +733,33 @@ class ContinuumGUI:
         # Remove duplicate help text from prior draws.
         for txt in self._fig.texts[:-1]:
             txt.remove()
+        self._draw_map()
         self._fig.canvas.draw_idle()
+
+    def _draw_map(self):
+        """Coverage strip: which parts of the spectrum have accepted fits."""
+        ax = self._ax_map
+        if ax is None:
+            return
+        ax.clear()
+        lo, hi = self.spec.wmin, self.spec.wmax
+        ax.set_xlim(lo, hi)
+        ax.set_ylim(0, 1)
+        ax.set_yticks([])
+        ax.axhspan(0, 1, color="0.88", zorder=0)
+        for (a, b) in self._covered_spans():
+            ax.axvspan(a, b, color="tab:green", alpha=0.55, lw=0, zorder=1)
+        for (m0, m1) in self.spec.meta.get("mask_regions", []):
+            ax.axvspan(m0, m1, color="red", alpha=0.30, lw=0, zorder=2)
+        cur = self.states[self.idx]
+        ax.axvspan(cur.w0, cur.w1, facecolor="none", edgecolor="k",
+                   lw=1.8, zorder=3)
+        n_gap = len(self._coverage_gaps())
+        ax.set_xlabel(
+            "coverage: green = accepted fit, red = masked, box = current "
+            f"window   ({n_gap} unfitted region{'' if n_gap == 1 else 's'} "
+            "left; click to jump)", fontsize=8)
+        ax.tick_params(labelsize=7)
 
     # ------------------------------------------------------------------
     # Output
