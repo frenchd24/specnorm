@@ -141,6 +141,11 @@ class PolynomialFitter(BaseFitter):
         xs = (x - x0) / sx
         self._cov = None
         try:
+            # An exact fit (n nodes, degree n-1) is legitimately
+            # "poorly conditioned" as far as polyfit is concerned; the
+            # user placed exactly enough nodes on purpose.
+            import warnings
+            warnings.filterwarnings("ignore", message=".*poorly conditioned.*")
             if self.nodes_err is not None:
                 coeffs, cov = np.polyfit(xs, y, self.degree,
                                          w=1.0 / self.nodes_err,

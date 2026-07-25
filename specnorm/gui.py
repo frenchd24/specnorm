@@ -17,10 +17,12 @@ nodes:
 * **left-click** (normal mode) drops a continuum node — the node's flux
   is the median *unmasked* flux within a small box around the click;
 * **right-click** (normal mode) deletes the nearest node;
-* **+** / **-** zoom the window out / in (geometrically, about its
-  centre), and the **left/right arrows** pan it while keeping its width;
-  **0** restores the default width.  Zooming out across a broad damped
-  feature (Galactic Ly-alpha at 1215 A) lets a single fit bridge it;
+* **+** / **-** zoom the window in / out (geometrically, about its
+  centre), the **left/right arrows** pan it while keeping its width, and
+  the **up/down arrows** zoom the flux axis about the continuum level;
+  **0** restores the default width and flux scaling.  Zooming out across
+  a broad damped feature (Galactic Ly-alpha at 1215 A) lets a single fit
+  bridge it;
 * a coverage strip under the plot shows which parts of the spectrum
   already have accepted fits (green), which are masked (red), and where
   the current window sits; click it to jump to any window;
@@ -55,9 +57,9 @@ HELP_TEXT = (
     "only)   x: exclude mode (also masked in output)   u: undo node   "
     "r: reset nodes\n"
     "f: fit   s: spline (thru nodes)   c: Chebyshev (fits data, sigma-clips "
-    "lines; nodes set ref level)   1-5: degree   +/-: zoom out/in   "
-    "arrows: pan window   0: reset width   enter/a: accept & next   "
-    "b: back   q: quit & save"
+    "lines; nodes set ref level)   1-5: degree   +/-: zoom in/out   "
+    "left/right: pan   up/down: y-zoom   0: reset view   "
+    "enter/a: accept & next   b: back   q: quit & save"
 )
 
 # Default geocoronal airglow regions (Angstroms): Ly-alpha and the OI
@@ -135,6 +137,13 @@ class ContinuumGUI:
     masked_path : str, optional
         If given, an intermediate masked-spectrum file is written here
         whenever a window is accepted and at the end of the session.
+    session_path : str, optional
+        If given, the full session (settings, masks, every window with
+        its nodes and model) is saved here as JSON each time a window
+        is accepted, so the work can be resumed or edited later.
+    source : dict, optional
+        How the spectrum was loaded (input path, extension, binning),
+        recorded in the session file so it can be reopened.
     low_rej, high_rej, niterate, grow, min_pix :
         Sigma-clipping parameters for the Chebyshev (data-fit) model;
         see :class:`specnorm.fitters.ChebyshevFitter`.
@@ -146,13 +155,17 @@ class ContinuumGUI:
                  mask_dq: bool = True, mask_regions=None,
                  exclude_regions=None,
                  masked_path: Optional[str] = None,
+                 session_path: Optional[str] = None,
                  low_rej: float = 1.5, high_rej: float = 3.5,
-                 niterate: int = 20, grow: int = 6, min_pix: int = 3):
+                 niterate: int = 20, grow: int = 6, min_pix: int = 3,
+                 source: Optional[dict] = None):
         if len(spectrum) < 2:
             raise ValueError("Spectrum has fewer than 2 points")
         self.spec = spectrum
         self.mask_dq = mask_dq
         self.masked_path = masked_path
+        self.session_path = session_path
+        self.source = dict(source or {})
         self.clip = dict(low_rej=low_rej, high_rej=high_rej,
                          niterate=niterate, grow=grow, min_pix=min_pix)
         for (m0, m1) in (mask_regions or []):
@@ -184,6 +197,8 @@ class ContinuumGUI:
         self._ax = None
         self._finished = False
         self._accept_seq = 0
+        self._y_zoom = 1.0        # >1 zooms in on the continuum level
+        self.y_zoom_factor = 1.4
         # In an overlap the more recently accepted fit dominates by this
         # factor per generation, so re-fitting a region supersedes what
         # was there before without a discontinuity.
@@ -201,7 +216,45 @@ class ContinuumGUI:
         st.fitter = None
 
     def _refresh_good(self):
-        self.good = self.spec.good_mask(use_dq=self.mask_dq, use_mask=True)
+        self.good = (self.spec.good_mask(use_dq=self.mask_dq, use_mask=True)
+                     & ~self._no_data(self.spec))
+        self._dead_cache = None
+
+    @staticmethod
+    def _no_data(spectrum: Spectrum) -> np.ndarray:
+        """Pixels that carry no measurement at all.
+
+        Detector edges are commonly padded with exactly zero flux and
+        zero error.  Such pixels must not anchor a continuum node — a
+        node dropped there would drag the fit to zero — and they need no
+        fit of their own.
+        """
+        nodata = ~np.isfinite(spectrum.flux)
+        if np.any(spectrum.error > 0):
+            nodata |= (spectrum.flux == 0) & (spectrum.error <= 0)
+        else:
+            nodata |= (spectrum.flux == 0)
+        return nodata
+
+    def _dead_mask(self, spectrum: Optional[Spectrum] = None) -> np.ndarray:
+        """Pixels that cannot anchor a fit and need none.
+
+        Spectrum edges frequently hold zero-flux or fully masked pixels;
+        they should not be reported as unfitted gaps, and the continuum
+        there is filled by extending the nearest fit.
+        """
+        if spectrum is None:
+            if getattr(self, "_dead_cache", None) is not None:
+                return self._dead_cache
+            spectrum = self.spec
+            cache = True
+        else:
+            cache = spectrum is self.spec
+        dead = (~spectrum.good_mask(use_dq=self.mask_dq, use_mask=True)
+                | self._no_data(spectrum))
+        if cache:
+            self._dead_cache = dead
+        return dead
 
     # ------------------------------------------------------------------
     # Main loop
@@ -387,18 +440,30 @@ class ContinuumGUI:
                 a, b = behind[0]
                 note = (f"Gap left unfitted at [{a:.1f}, {b:.1f}] — "
                         "press b or click the coverage bar to go back")
-            if self.idx + 1 < len(self.states):
-                self.idx += 1
+            nxt = self._next_needing_work(self.idx + 1)
+            if nxt is None:
+                self._finished = True
+                self._save_session()
+                plt.close(self._fig)
+            else:
+                wrapped = nxt <= self.idx
+                self.idx = nxt
                 self._mask_mode = None
                 self._mask_start = None
+                if wrapped and not note:
+                    remaining = len(self._coverage_gaps())
+                    note = (f"Back to an unfitted region "
+                            f"({remaining} left) — press q to save and stop")
+                self._save_session()
                 self._draw(message=note)
-            else:
-                self._finished = True
-                plt.close(self._fig)
         elif key in ("+", "="):
-            self._resize_window(+1)
+            self._resize_window(-1)      # '+' = zoom in (narrower window)
         elif key in ("-", "_"):
-            self._resize_window(-1)
+            self._resize_window(+1)      # '-' = zoom out (wider window)
+        elif key == "up":
+            self._zoom_y(+1)
+        elif key == "down":
+            self._zoom_y(-1)
         elif key == "left":
             self._pan_window(-1)
         elif key == "right":
@@ -410,6 +475,7 @@ class ContinuumGUI:
             self._draw()
         elif key == "q":
             self._finished = True
+            self._save_session()
             plt.close(self._fig)
 
     # ------------------------------------------------------------------
@@ -460,7 +526,7 @@ class ContinuumGUI:
         self._draw(message=note)
 
     def _resize_window(self, direction: int):
-        """Zoom the current window out (direction>0) or in (direction<0).
+        """Widen the current window (direction>0) or narrow it (<0).
 
         Zooming is geometric about the window centre, so repeated
         presses scale smoothly and zooming in always works.
@@ -508,9 +574,20 @@ class ContinuumGUI:
         self._reshape_window(new_w0, new_w1,
                              f"Window [{new_w0:.2f}, {new_w1:.2f}]")
 
+    def _zoom_y(self, direction: int):
+        """Zoom the flux axis in (direction>0) or out, about the continuum."""
+        if direction > 0:
+            self._y_zoom *= self.y_zoom_factor
+        else:
+            self._y_zoom = max(self._y_zoom / self.y_zoom_factor, 0.05)
+        self._draw(message=f"y-zoom x{self._y_zoom:.2f}"
+                           + ("  (0 resets)" if self._y_zoom != 1.0 else ""))
+
     def _reset_window(self):
-        """Restore the current window to the default width (recentred)."""
+        """Restore the default window width and flux scaling."""
+        self._y_zoom = 1.0
         if self.default_window <= 0:
+            self._draw(message="View reset")
             return
         st = self.states[self.idx]
         centre = 0.5 * (st.w0 + st.w1)
@@ -534,6 +611,46 @@ class ContinuumGUI:
         self.idx = nearest
         self._draw(message=f"Jumped to nearest window {nearest + 1}")
 
+    def _uncovered(self) -> np.ndarray:
+        """Pixels of the fitting spectrum still wanting a continuum."""
+        wave = self.spec.wavelength
+        need = ~self._dead_mask()
+        for (a, b) in self._covered_spans():
+            need &= ~((wave >= a) & (wave <= b))
+        return need
+
+    def _next_needing_work(self, start: int) -> Optional[int]:
+        """Index of the next window with unfitted, fittable pixels.
+
+        Searches forward from ``start`` and then wraps, so reaching the
+        end of the spectrum sends you back to anything skipped rather
+        than ending the session.  If a gap is not covered by any window
+        (panning can leave one), a window is created for it.
+        """
+        need = self._uncovered()
+        if not need.any():
+            return None
+        wave = self.spec.wavelength
+        order = list(range(start, len(self.states))) + list(range(0, start))
+        for i in order:
+            s = self.states[i]
+            sel = (wave >= s.w0) & (wave <= s.w1)
+            if sel.any() and need[sel].any():
+                return i
+        gaps = self._coverage_gaps()
+        if not gaps:
+            return None
+        a, _b = gaps[0]
+        width = (self.default_window if self.default_window > 0
+                 else self.spec.wmax - self.spec.wmin)
+        fresh = WindowState(w0=max(a, self.spec.wmin),
+                            w1=min(a + width, self.spec.wmax),
+                            fitter_kind=self.init_fitter,
+                            degree=self.init_degree, resized=True)
+        self.states.append(fresh)
+        self.states.sort(key=lambda s: (s.w0, s.w1))
+        return next(i for i, s in enumerate(self.states) if s is fresh)
+
     def _covered_spans(self):
         """Sorted (w0, w1) spans of windows with an accepted fit."""
         return sorted((s.w0, s.w1) for s in self.states
@@ -553,7 +670,16 @@ class ContinuumGUI:
         if cursor < limit:
             gaps.append((cursor, limit))
         tol = 1e-6 * max(self.spec.wmax - self.spec.wmin, 1.0)
-        return [(a, b) for (a, b) in gaps if b - a > tol]
+        gaps = [(a, b) for (a, b) in gaps if b - a > tol]
+        # Drop stretches that hold no fittable data at all (dead edges,
+        # fully masked ranges): there is nothing there to fit.
+        dead = self._dead_mask()
+        alive = []
+        for (a, b) in gaps:
+            sel = (self.spec.wavelength >= a) & (self.spec.wavelength <= b)
+            if sel.any() and not dead[sel].all():
+                alive.append((a, b))
+        return alive
 
     def _knit_accepted(self):
         """Fit the newly accepted window in among the existing ones.
@@ -696,10 +822,14 @@ class ContinuumGUI:
             self._draw(message=f"Kept {prev[2].label()} — "
                                f"not enough nodes for the requested model")
 
-    def _fit_current(self, quiet: bool = False):
-        st = self.states[self.idx]
+    def _fit_window(self, st: WindowState) -> Optional[str]:
+        """Fit one window in place.  Returns an error message or None.
+
+        Kept free of drawing so sessions can be restored by refitting
+        every window without a figure.
+        """
         fitter = self._make_fitter(st)
-        sel = self._window_sel(st)
+        sel = (self.spec.wavelength >= st.w0) & (self.spec.wavelength <= st.w1)
         st.rejected = None
 
         if getattr(fitter, "fits_data", False):
@@ -712,9 +842,8 @@ class ContinuumGUI:
             n_use = int(use.sum())
             if n_use < st.degree + 2:
                 self._clear_fit(st)
-                self._draw(message=f"Need >= {st.degree + 2} unmasked points "
-                                   f"for {fitter.label()} ({n_use} available)")
-                return
+                return (f"Need >= {st.degree + 2} unmasked points "
+                        f"for {fitter.label()} ({n_use} available)")
             err = self.spec.error[use]
             init_x = st.nodes_x if st.nodes_x else None
             init_y = st.nodes_y if st.nodes_x else None
@@ -731,14 +860,17 @@ class ContinuumGUI:
         else:
             if len(st.nodes_x) < fitter.min_nodes:
                 self._clear_fit(st)
-                self._draw(message=f"Need >= {fitter.min_nodes} nodes for "
-                                   f"{fitter.label()} ({len(st.nodes_x)} placed)")
-                return
+                return (f"Need >= {fitter.min_nodes} nodes for "
+                        f"{fitter.label()} ({len(st.nodes_x)} placed)")
             fitter.fit(st.nodes_x, st.nodes_y, st.nodes_e)
             st.continuum = fitter(self.spec.wavelength[sel])
             st.cont_err = fitter.uncertainty(self.spec.wavelength[sel])
             st.fitter = fitter
-        self._draw()
+        return None
+
+    def _fit_current(self, quiet: bool = False):
+        message = self._fit_window(self.states[self.idx])
+        self._draw(message=message or "")
 
     def _draw(self, message: str = ""):
         ax, st = self._ax, self.states[self.idx]
@@ -809,7 +941,20 @@ class ContinuumGUI:
         if ref.size:
             lo, hi = float(np.min(ref)), float(np.max(ref))
             pad = 0.07 * (hi - lo) if hi > lo else (abs(hi) * 0.1 or 1.0)
-            ax.set_ylim(lo - pad, hi + pad)
+            lo, hi = lo - pad, hi + pad
+            if self._y_zoom != 1.0:
+                # Zoom about the continuum level, not the middle of the
+                # range, so the continuum stays in view as you zoom in.
+                if st.continuum is not None and np.isfinite(st.continuum).any():
+                    anchor = float(np.nanmedian(st.continuum))
+                elif f[g].size:
+                    anchor = float(np.median(f[g]))
+                else:
+                    anchor = 0.5 * (lo + hi)
+                anchor = min(max(anchor, lo), hi)
+                lo = anchor - (anchor - lo) / self._y_zoom
+                hi = anchor + (hi - anchor) / self._y_zoom
+            ax.set_ylim(lo, hi)
 
         model = {"spline": "spline (nodes)",
                  "poly": f"poly deg {st.degree} (nodes)",
@@ -876,6 +1021,92 @@ class ContinuumGUI:
     # ------------------------------------------------------------------
     # Output
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Session persistence
+    # ------------------------------------------------------------------
+    def session_state(self) -> dict:
+        """Everything needed to rebuild this session later."""
+        from . import __version__
+        return {
+            "specnorm_version": __version__,
+            "source": self.source,
+            "settings": {
+                "window": self.default_window,
+                "overlap": self.overlap,
+                "fitter": self.init_fitter,
+                "degree": self.init_degree,
+                "mask_dq": self.mask_dq,
+                "node_box": self.node_box,
+                "clip": dict(self.clip),
+            },
+            "fit_mask_regions": [list(r) for r in
+                                 self.spec.meta.get("fit_mask_regions", [])],
+            "exclude_regions": [list(r) for r in
+                                self.spec.meta.get("exclude_regions", [])],
+            "accept_seq": self._accept_seq,
+            "windows": [
+                {"w0": float(s.w0), "w1": float(s.w1),
+                 "nodes_x": [float(v) for v in s.nodes_x],
+                 "nodes_y": [float(v) for v in s.nodes_y],
+                 "nodes_e": [float(v) for v in s.nodes_e],
+                 "model": s.fitter_kind, "degree": int(s.degree),
+                 "accepted": bool(s.accepted),
+                 "accept_seq": int(s.accept_seq),
+                 "resized": bool(s.resized)}
+                for s in self.states
+            ],
+        }
+
+    def save_session(self, path: str) -> str:
+        """Write the session to JSON so it can be resumed or edited."""
+        import json
+        with open(path, "w") as fh:
+            json.dump(self.session_state(), fh, indent=1)
+        return path
+
+    def _save_session(self):
+        if self.session_path is None:
+            return
+        try:
+            self.save_session(self.session_path)
+        except Exception as exc:      # never let I/O kill the session
+            print(f"Warning: could not write session file: {exc}")
+
+    def restore_session(self, state: dict, refit: bool = True):
+        """Rebuild windows, masks and fits from :meth:`session_state`."""
+        for key, kind in (("fit_mask_regions", "fit"),
+                          ("exclude_regions", "exclude")):
+            for (m0, m1) in state.get(key, []):
+                self.spec.mask_region(m0, m1, kind=kind)
+        self._refresh_good()
+
+        states = []
+        for w in state.get("windows", []):
+            st = WindowState(
+                w0=float(w["w0"]), w1=float(w["w1"]),
+                nodes_x=[float(v) for v in w.get("nodes_x", [])],
+                nodes_y=[float(v) for v in w.get("nodes_y", [])],
+                nodes_e=[float(v) for v in w.get("nodes_e", [])],
+                fitter_kind=w.get("model", self.init_fitter),
+                degree=int(w.get("degree", self.init_degree)),
+                accepted=bool(w.get("accepted", False)),
+                accept_seq=int(w.get("accept_seq", -1)),
+                resized=bool(w.get("resized", False)))
+            states.append(st)
+        if states:
+            self.states = states
+        self._accept_seq = int(state.get("accept_seq", len(self.states)))
+        if refit:
+            for st in self.states:
+                if st.nodes_x or st.fitter_kind == "cheb":
+                    if self._fit_window(st) is not None:
+                        st.accepted = False      # could not be rebuilt
+                else:
+                    st.accepted = False
+        first = self._next_needing_work(0)
+        self.idx = 0 if first is None else first
+        return self
+
     def _write_masked(self):
         if self.masked_path is None:
             return
@@ -1012,6 +1243,22 @@ class ContinuumGUI:
             cont = np.where(covered, cont / denom, np.nan)
             cerr = np.where(covered, cerr / denom, np.nan)
 
+        # Pixels with no measurement — the zero-flux, zero-error padding
+        # at detector edges — get the nearest fit extended over them
+        # instead of whatever the model happens to do out there.
+        # np.interp holds its end values, so edges come out flat and any
+        # interior data-less stretch is bridged linearly.  Masked pixels
+        # that *do* carry data keep the continuum drawn across them.
+        n_filled = 0
+        nodata = self._no_data(spectrum)
+        usable = covered & ~nodata
+        if nodata.any() and usable.any():
+            src = np.flatnonzero(usable)
+            cont[nodata] = np.interp(wave[nodata], wave[src], cont[src])
+            cerr[nodata] = np.interp(wave[nodata], wave[src], cerr[src])
+            n_filled = int(nodata.sum())
+            covered = covered | nodata
+
         # Only *exclusions* reach the output: fit masks hide features
         # from the continuum fit but leave the data intact for analysis.
         exclude_regions = list(self.spec.meta.get("exclude_regions", []))
@@ -1022,6 +1269,7 @@ class ContinuumGUI:
 
         meta = dict(spectrum.meta)
         meta["specnorm"] = {
+            "dead_pixels_filled": n_filled,
             "fit_mask_regions": fit_regions,
             "exclude_regions": exclude_regions,
             "binning": spectrum.meta.get("binning", 1),
@@ -1037,6 +1285,45 @@ class ContinuumGUI:
         return NormalizedSpectrum(wave, spectrum.flux, cont,
                                   spectrum.error, mask=mask,
                                   cont_err=cerr, meta=meta)
+
+
+def load_session(path: str):
+    """Read a session file and rebuild the spectrum and GUI from it.
+
+    Returns ``(gui, native_spectrum)`` where ``native_spectrum`` is the
+    unbinned spectrum to write output on (None if no binning was used).
+    """
+    import json
+    from .io import read_spectrum
+    from .spectrum import bin_spectrum
+
+    with open(path) as fh:
+        state = json.load(fh)
+    src = state.get("source", {})
+    infile = src.get("input")
+    if not infile:
+        raise ValueError(f"{path} does not record which file it came from")
+    spec = read_spectrum(infile, ext=src.get("ext"))
+    native = None
+    nbin = int(src.get("bin", 1) or 1)
+    if nbin > 1:
+        native = spec
+        spec = bin_spectrum(spec, nbin)
+
+    cfg = state.get("settings", {})
+    gui = ContinuumGUI(
+        spec,
+        window=float(cfg.get("window", 20.0)),
+        overlap=float(cfg.get("overlap", 0.15)),
+        fitter=cfg.get("fitter", "spline"),
+        degree=int(cfg.get("degree", 3)),
+        node_box=cfg.get("node_box"),
+        mask_dq=bool(cfg.get("mask_dq", True)),
+        session_path=path,
+        source=src,
+        **cfg.get("clip", {}))
+    gui.restore_session(state)
+    return gui, native
 
 
 def normalize_interactive(spectrum: Spectrum, window: float = 20.0,

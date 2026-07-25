@@ -84,9 +84,10 @@ Use `--ext N` to force a specific FITS extension.
 | `s` | switch to cubic spline (interpolates through your nodes) |
 | `c` | switch to sigma-clipped Chebyshev (fits the data, rejects lines) |
 | `1`–`5` | set the degree of the current model (switches spline to polynomial) |
-| `+` / `-` | zoom the current window out / in (geometric, x1.5 per press, about the window centre) |
+| `+` / `-` | zoom the current window in / out (geometric, x1.5 per press, about the window centre) |
 | `←` / `→` | pan the window left / right by a quarter of its width, keeping the width |
-| `0` | reset the current window to the default width |
+| `↑` / `↓` | zoom the flux axis in / out, about the continuum level so it stays in view |
+| `0` | reset the window to the default width and the flux scaling |
 | click the coverage strip | jump to the window at that wavelength |
 | `enter` or `a` | accept this window's fit, advance to the next |
 | `b` | go back one window |
@@ -109,13 +110,14 @@ constrained there (few nodes, or few unclipped pixels).
 
 **Adjustable window (broad features).** For a wide absorption feature such
 as the Galactic Ly-alpha damping trough at 1215 A — far wider than a normal
-20 A window — press `+` to zoom out until the window spans the whole
+20 A window — press `-` to zoom out until the window spans the whole
 feature, place continuum nodes on the clean shoulders either side, and fit a
 flat/linear continuum straight across (a degree-1 polynomial or a spline
 through the two shoulders). Because node placement and the applied continuum
 both operate on the current window, zooming out is what lets a single fit
-bridge the trough. `-` zooms back in, the arrow keys pan the window without
-changing its width, and `0` restores the default width. Zoom is geometric
+bridge the trough. `+` zooms back in, the left/right arrows pan the window
+without changing its width, the up/down arrows zoom the flux axis, and `0`
+restores the default view. Zoom is geometric
 (x1.5 per press) about the window centre, so repeated presses scale smoothly
 in both directions.
 
@@ -282,6 +284,36 @@ panel width with `--overview-zoom`, the repeat with `--overview-overlap`, or
 skip the plot with `--no-overview`. From Python:
 `plot_overview(result, "overview.pdf", zoom=3.0, overlap=0.15)` — a `.png`
 path gives a single tall figure instead of a paged PDF.
+
+### Dead pixels and finishing
+
+Detector edges are usually padded with zero flux and zero error. Those
+pixels cannot anchor a node (a node dropped there would drag the fit to
+zero), they are never reported as unfitted gaps, and the continuum across
+them is filled by holding the nearest fitted value — so a spectrum never
+ends with a stray "missing window" you cannot fit.
+
+Accepting the last window no longer ends the session while fittable regions
+remain: you are sent back to the first one still outstanding, with a count of
+what is left. Press **`q`** whenever you want to stop and write out what you
+have.
+
+### Saving and resuming a session
+
+Every acceptance writes `<output>_session.json` (change it with `--session`,
+or `--session none` to skip) recording the input file, binning, all settings,
+both mask lists, and every window with its nodes, model and acceptance state.
+To carry on later, or to go back and edit a region after you have already
+written the output:
+
+```bash
+specnorm --resume myspectrum_norm_session.json
+```
+
+The spectrum is reopened, the masks reapplied and every window refit from its
+saved nodes, reproducing the previous continuum exactly, and the GUI opens on
+the first region still needing work. From Python, `load_session(path)` returns
+the rebuilt `(gui, native_spectrum)` pair.
 
 ### Intermediate masked file
 

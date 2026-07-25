@@ -24,10 +24,11 @@ from .spectrum import Spectrum, NormalizedSpectrum, bin_spectrum
 from .io import read_spectrum
 from .writer import write_spectrum, write_masked
 from .fitters import SplineFitter, PolynomialFitter, ChebyshevFitter, make_fitter
-from .gui import ContinuumGUI, normalize_interactive, AIRGLOW_REGIONS
+from .gui import (ContinuumGUI, normalize_interactive,
+                  AIRGLOW_REGIONS, load_session)
 from .plotting import plot_overview
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"
 
 __all__ = [
     "Spectrum",
@@ -38,6 +39,7 @@ __all__ = [
     "bin_spectrum",
     "AIRGLOW_REGIONS",
     "plot_overview",
+    "load_session",
     "SplineFitter",
     "PolynomialFitter",
     "ChebyshevFitter",
