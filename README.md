@@ -87,6 +87,7 @@ Use `--ext N` to force a specific FITS extension.
 | `+` / `-` | zoom the current window in / out (geometric, x1.5 per press, about the window centre) |
 | `←` / `→` | pan the window left / right by a quarter of its width, keeping the width |
 | `↑` / `↓` | zoom the flux axis in / out, about the continuum level so it stays in view |
+| `d` | drop other accepted fits overlapping this window, so a region can be redone from scratch |
 | `0` | reset the window to the default width and the flux scaling |
 | click the coverage strip | jump to the window at that wavelength |
 | `enter` or `a` | accept this window's fit, advance to the next |
@@ -324,6 +325,21 @@ The spectrum is reopened, the masks reapplied and every window refit from its
 saved nodes, reproducing the previous continuum exactly, and the GUI opens on
 the first region still needing work. From Python, `load_session(path)` returns
 the rebuilt `(gui, native_spectrum)` pair.
+
+**A resumed session never closes itself** — you are editing, so it stays open
+however many regions you redo, until you press `q`. (A fresh run still closes
+once the whole spectrum has been covered for the first time; set
+`gui.finish_when_complete = False` to keep it open.) The session file is
+rewritten on every acceptance and whenever the window closes, so nothing is
+lost either way.
+
+**Redoing a region.** Coming back to a window and editing its nodes un-accepts
+it until you refit, so the coverage strip never shows a fit that no longer
+exists. If you zoom in and refit a sub-region, the previous fit is kept as
+wings either side rather than deleted — a message tells you where they are.
+When you would rather start clean, press **`d`** to drop every accepted fit
+overlapping the current window; whatever coverage that removes is reported as
+a gap so you can refit it deliberately.
 
 ### Intermediate masked file
 

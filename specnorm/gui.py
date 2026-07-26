@@ -64,7 +64,8 @@ HELP_TEXT = (
     "only)   x: exclude mode (also masked in output)   u: undo node   "
     "r: reset nodes\n"
     "f: fit   s: spline (thru nodes)   c: Chebyshev (fits data, sigma-clips "
-    "lines; nodes set ref level)   1-5: degree   +/-: zoom in/out   "
+    "lines; nodes set ref level)   1-5: degree   d: drop overlapping fits   "
+    "+/-: zoom in/out   "
     "left/right: pan   up/down: y-zoom   0: reset view   "
     "enter/a: accept & next   b: back   q: quit & save"
 )
@@ -204,6 +205,11 @@ class ContinuumGUI:
         self._ax = None
         self._finished = False
         self._accept_seq = 0
+        # A fresh run may close itself once the whole spectrum is
+        # covered; a resumed one never does, since you are editing and
+        # decide yourself when to stop (q).
+        self.finish_when_complete = True
+        self._knit_note = ""
         self._y_zoom = 1.0        # >1 zooms in on the continuum level
         self.y_zoom_factor = 1.4
         # In an overlap the more recently accepted fit dominates by this
@@ -216,11 +222,17 @@ class ContinuumGUI:
 
     @staticmethod
     def _clear_fit(st: WindowState):
-        """Discard a window's fit (it is stale, e.g. nodes changed)."""
+        """Discard a window's fit (it is stale, e.g. nodes changed).
+
+        The window also stops counting as accepted: without a model it
+        contributes nothing to the knitted continuum, so saying it was
+        accepted would misreport the coverage.
+        """
         st.continuum = None
         st.cont_err = None
         st.rejected = None
         st.fitter = None
+        st.accepted = False
 
     def _refresh_good(self):
         self.good = (self.spec.good_mask(use_dq=self.mask_dq, use_mask=True)
@@ -288,6 +300,7 @@ class ContinuumGUI:
         self._draw()
         plt.show()  # blocks until window closed
         self._write_masked()
+        self._save_session()
         return self._assemble()
 
     # ------------------------------------------------------------------
@@ -431,6 +444,7 @@ class ContinuumGUI:
                 self._fit_current()
             if st.fitter is None:
                 return  # fit failed; message already shown
+            had_gaps = bool(self._coverage_gaps())
             st.accepted = True
             st.accept_seq = self._accept_seq
             self._accept_seq += 1
@@ -448,11 +462,24 @@ class ContinuumGUI:
                 a, b = behind[0]
                 note = (f"Gap left unfitted at [{a:.1f}, {b:.1f}] — "
                         "press b or click the coverage bar to go back")
+            if self._knit_note:
+                note = (note + "   " if note else "") + self._knit_note
+                self._knit_note = ""
             nxt = self._next_needing_work(self.idx + 1)
-            if nxt is None:
+            if nxt is None and self.finish_when_complete and had_gaps:
+                # Reached full coverage by working through the spectrum.
                 self._finished = True
                 self._save_session()
                 plt.close(self._fig)
+            elif nxt is None:
+                # Everything is covered but you are editing: stay open.
+                self._save_session()
+                if self.idx + 1 < len(self.states):
+                    self.idx += 1
+                self._mask_mode = None
+                self._mask_start = None
+                self._draw(message=(note + "   " if note else "")
+                           + "All regions covered — press q to save and quit")
             else:
                 wrapped = nxt <= self.idx
                 self.idx = nxt
@@ -472,6 +499,8 @@ class ContinuumGUI:
             self._zoom_y(+1)
         elif key == "down":
             self._zoom_y(-1)
+        elif key == "d":
+            self._drop_overlapping_fits()
         elif key == "left":
             self._pan_window(-1)
         elif key == "right":
@@ -689,6 +718,39 @@ class ContinuumGUI:
                 alive.append((a, b))
         return alive
 
+    def _drop_overlapping_fits(self):
+        """Discard other accepted fits overlapping the current window.
+
+        Use when you have come back to redo a region and want the old
+        fit gone rather than knitted around: the leftovers are cleared,
+        so the region is yours alone once you refit.  Any coverage this
+        removes is reported as a gap, so nothing is lost silently.
+        """
+        cur = self.states[self.idx]
+        dropped = []
+        keep = []
+        for s in self.states:
+            if s is cur or not (s.accepted or s.fitter is not None):
+                keep.append(s)
+                continue
+            if s.w1 <= cur.w0 or s.w0 >= cur.w1:
+                keep.append(s)
+                continue
+            dropped.append((s.w0, s.w1))
+            if s.w0 >= cur.w0 and s.w1 <= cur.w1:
+                continue                      # wholly inside: remove it
+            s.accepted = False
+            self._clear_fit(s)
+            keep.append(s)
+        if not dropped:
+            self._draw(message="No other fits overlap this window")
+            return
+        self.states = keep
+        self.idx = next(i for i, s in enumerate(self.states) if s is cur)
+        ranges = ", ".join(f"{a:.1f}-{b:.1f}" for (a, b) in dropped)
+        self._draw(message=f"Dropped {len(dropped)} overlapping fit(s) "
+                           f"({ranges}) — refit and accept")
+
     def _knit_accepted(self):
         """Fit the newly accepted window in among the existing ones.
 
@@ -705,6 +767,7 @@ class ContinuumGUI:
                  if self.default_window > 0 else 0.0)
         survivors = []
         retired = 0
+        wings = []
         for s in self.states:
             if s is cur:
                 survivors.append(s)
@@ -728,6 +791,8 @@ class ContinuumGUI:
                 s.w1 = min(cur.w0 + blend, s.w1)
                 survivors.append(s)
                 survivors.append(right)
+                wings.append((s.w0, s.w1))
+                wings.append((right.w0, right.w1))
                 continue
             if s.w0 < cur.w0 < s.w1:          # old fit laps in from the left
                 s.w1 = max(min(s.w1, cur.w0 + blend), s.w0)
@@ -738,8 +803,14 @@ class ContinuumGUI:
         survivors.sort(key=lambda s: (s.w0, s.w1))
         self.states = survivors
         self.idx = next(i for i, s in enumerate(survivors) if s is cur)
+        notes = []
+        if wings:
+            ranges = ", ".join(f"{a:.1f}-{b:.1f}" for (a, b) in wings)
+            notes.append(f"older fit kept either side ({ranges}); "
+                         "press d to drop it and refit")
         if retired:
-            self._retired_note = retired
+            notes.append(f"{retired} covered window(s) retired")
+        self._knit_note = "   ".join(notes)
 
     def _retile_tail(self):
         """Rebuild the windows after the current one from its right edge.
@@ -821,12 +892,12 @@ class ContinuumGUI:
         previous model and its fit are restored.
         """
         prev = (st.fitter_kind, st.degree, st.fitter, st.continuum,
-                st.cont_err, st.rejected)
+                st.cont_err, st.rejected, st.accepted)
         st.fitter_kind, st.degree = kind, degree
         self._fit_current(quiet=True)
         if st.fitter is None and prev[2] is not None:
             (st.fitter_kind, st.degree, st.fitter, st.continuum,
-             st.cont_err, st.rejected) = prev
+             st.cont_err, st.rejected, st.accepted) = prev
             self._draw(message=f"Kept {prev[2].label()} — "
                                f"not enough nodes for the requested model")
 
@@ -1405,6 +1476,8 @@ def load_session(path: str):
         source=src,
         **cfg.get("clip", {}))
     gui.restore_session(state)
+    # You are editing: decide yourself when to stop.
+    gui.finish_when_complete = False
     return gui, native
 
 
