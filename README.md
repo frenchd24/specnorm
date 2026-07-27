@@ -155,10 +155,17 @@ therefore never destroys the neighbouring work, and zooming into an
 already-accepted window preserves its surrounding coverage as separate
 wings.
 
-Where fits do overlap, they are combined with weights built from three
-factors: an edge taper (so joins are smooth), **recency** (a fit accepted
-later dominates one accepted earlier, so a re-fit supersedes what was
-there), and **reliability**. The last one guards against a failure mode of
+Where fits do overlap, they are combined as a **partition of unity**: each
+fit ramps in and out over the overlap with a smoothstep, reaching zero value
+*and* zero slope at its own edges and staying flat across its interior.
+Neighbouring ramps are complementary, so a join is a gradual crossover rather
+than a step — a 20% mismatch between adjacent fits crosses over smoothly
+across the whole overlap instead of jumping in a single pixel. Precedence
+(**recency**: a fit accepted later outranks an earlier one, so a re-fit
+supersedes what was there) is a constant per window and capped at one
+generation; deriving it per pixel, or letting the ratio grow without bound,
+would shove the crossover against a window edge and turn it back into a
+cliff. The third factor is **reliability**. The last one guards against a failure mode of
 high-order fits: a polynomial or Chebyshev series can run away at the edge
 of its window, and if that edge overlaps a neighbour it would otherwise drag
 the knitted continuum with it. A fit is therefore down-weighted where it
@@ -167,6 +174,17 @@ further from the local flux level than a competing fit does — so in an
 overlap the fit that stays closer to the data wins. In testing, a degree-5
 fit diverging to −142x the continuum level is suppressed to leave the
 knitted result within 0.03% of the true continuum.
+
+Two limits are worth knowing, because no weighting scheme can remove them:
+
+- **A crossover can only be as wide as the overlap.** If two adjacent fits
+  genuinely disagree, that difference has to be traversed somewhere. Raise
+  `--overlap` for gentler transitions.
+- **Where both fits extrapolate past their outermost nodes, the join is not
+  constrained by data at all** and its error roughly doubles. Since both
+  fits are penalised equally there, weighting cannot help — so the stretch
+  of the current window beyond its outermost nodes is shaded and labelled
+  *extrapolated (no node)* in the plot. Placing a node there is the cure.
 
 When you accept a window whose span you changed, the rest of the spectrum
 re-tiles at the default width from its right edge, preserving any downstream
