@@ -84,11 +84,11 @@ Use `--ext N` to force a specific FITS extension.
 | `s` | switch to cubic spline (interpolates through your nodes) |
 | `c` | switch to sigma-clipped Chebyshev (fits the data, rejects lines) |
 | `1`–`5` | set the degree of the current model (switches spline to polynomial) |
-| `+` / `-` | zoom the view in / out (geometric, ~12% per press, about the view centre) |
+| `+` / `-` | zoom the view in / out (geometric, ~3% per press, about the view centre) |
 | `←` / `→` | pan the window left / right by a quarter of its width, keeping the width |
 | `↑` / `↓` | zoom the flux axis in / out (~9% per press), about the continuum level so it stays in view |
 | `d` | drop other accepted fits overlapping this window, so a region can be redone from scratch |
-| `0` | reset the window to the default width and the flux scaling |
+| `0` | restore automatic view sizing and the flux scaling |
 | click the coverage strip | jump to the window at that wavelength |
 | `enter` or `a` | accept this window's fit, advance to the next |
 | `b` | go back one window |
@@ -136,6 +136,15 @@ without changing its width, the up/down arrows zoom the flux axis, and `0`
 restores the default view. Zoom is geometric
 (x1.5 per press) about the window centre, so repeated presses scale smoothly
 in both directions.
+
+**The zoom level stays where you put it.** Once you zoom or pan, that width
+is carried over to the next window you visit, so accepting a fit no longer
+snaps the view sharply in when the next window happens to be narrow (a
+trimmed wing in a resumed session, say). A carried width only changes what
+you *see*: fitting adopts the view as the window's governing span only where
+you deliberately zoomed for that window, so inheriting a wide view never
+silently widens later fits. A window wider than your chosen zoom is still
+shown whole, and `0` returns to automatic sizing.
 
 The fit follows the view: it is re-evaluated from the fitted model whenever
 you zoom, pan, or move between windows, so a continuum you have fitted stays

@@ -199,7 +199,7 @@ class ContinuumGUI:
         # so zooming in always works (a fixed step could never shrink a
         # default-width window).  Kept small so a press nudges the view
         # rather than jumping it; hold the key to travel further.
-        self.zoom_factor = 1.125
+        self.zoom_factor = 1.03125
         self.pan_frac = 0.25   # pan step as a fraction of current width
         self.min_window = max(5 * self.node_box,
                               0.05 * self.default_window)
@@ -219,6 +219,10 @@ class ContinuumGUI:
         # a fit controls in the knitted continuum.
         self._view_override = None
         self._view_idx = -1
+        # Width you last zoomed to.  It persists as you move between
+        # windows so the zoom level stays where you put it; 0 restores
+        # automatic sizing.
+        self._view_width = None
         self.y_zoom_factor = 1.1
         # In an overlap the more recently accepted fit dominates by this
         # factor per generation, so re-fitting a region supersedes what
@@ -537,18 +541,36 @@ class ContinuumGUI:
     def _view_range(self):
         """The wavelength range on display.
 
-        Defaults to the current window's governing span, but zooming and
-        panning override it without touching that span.
+        Defaults to the current window's governing span.  Zooming and
+        panning override it for that window without touching the span,
+        and the *width* you chose is carried over to the next window you
+        visit — otherwise moving on to a narrow window (a trimmed wing,
+        say) would snap the view sharply in.  The carried width never
+        hides part of the window you are working on, so you always see
+        the stretch your fit will govern.
         """
         st = self.states[self.idx]
         if self._view_override is not None and self._view_idx == self.idx:
             return self._view_override
-        return (st.w0, st.w1)
+        if self._view_width is None:
+            return (st.w0, st.w1)
+        width = max(self._view_width, st.w1 - st.w0)
+        centre = 0.5 * (st.w0 + st.w1)
+        v0, v1 = centre - 0.5 * width, centre + 0.5 * width
+        if v0 < self.spec.wmin:
+            v0, v1 = self.spec.wmin, min(self.spec.wmin + width, self.spec.wmax)
+        if v1 > self.spec.wmax:
+            v1 = self.spec.wmax
+            v0 = max(self.spec.wmax - width, self.spec.wmin)
+        return (v0, v1)
 
-    def _set_view(self, v0: float, v1: float):
+    def _set_view(self, v0: float, v1: float, sticky: bool = True):
         self._view_override = (max(v0, self.spec.wmin),
                                min(v1, self.spec.wmax))
         self._view_idx = self.idx
+        if sticky:
+            self._view_width = (self._view_override[1]
+                                - self._view_override[0])
 
     def _view_sel(self) -> np.ndarray:
         v0, v1 = self._view_range()
@@ -620,6 +642,7 @@ class ContinuumGUI:
         """Drop any zoom or pan: show exactly what this window governs."""
         self._y_zoom = 1.0
         self._view_override = None
+        self._view_width = None
         self._draw(message="View reset to this window's range")
 
     def _detach_accepted(self, st: WindowState) -> bool:
@@ -656,6 +679,12 @@ class ContinuumGUI:
         re-fitting a sub-region does not silently drop coverage that was
         already agreed.  Returns True if the span changed.
         """
+        deliberate = (self._view_override is not None
+                      and self._view_idx == self.idx)
+        if not deliberate:
+            # The view width was inherited from the previous window, not
+            # chosen here: show more, but govern the same stretch.
+            return False
         v0, v1 = self._view_range()
         if abs(v0 - st.w0) < 1e-12 and abs(v1 - st.w1) < 1e-12:
             return False
