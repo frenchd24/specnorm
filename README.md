@@ -99,15 +99,20 @@ toolbar tool is active (matplotlib's default key shortcuts are disabled so
 they don't collide with the bindings above). Each window remembers its own
 nodes and model, so you can go back and revise.
 
-**The plot always shows the knitted continuum.** The blue curve is not
-the current window's model in isolation — it is every accepted fit blended
-together exactly as it will be written out. Zoom out and you see the real
-continuum across all those windows, so you can judge which regions need
-redoing and spot joins that knitted badly. The window you are editing is
-previewed in that curve at top precedence (so you see what accepting will
-produce), and where its own model differs from the knitted result it is
-drawn separately as a dashed purple line. Stretches with no fit yet appear
-as breaks in the curve, marked along the bottom axis.
+**The plot always shows the final knitted continuum.** The blue curve is
+every accepted fit blended together, exactly as it will be written out — and
+it does not depend on the view. Zoom or pan however you like and the curve
+stays put, so you can judge which regions need redoing and spot joins that
+knitted badly without the display shifting under you.
+
+The fit you are working on is drawn separately, as a dashed purple line over
+its own span. Until you accept it, it contributes to the blue curve only
+where nothing accepted covers yet (filling a gap), never overriding the
+accepted result — and only across the range its nodes actually constrain, so
+a narrow fit seen from a zoomed-out window is not smeared across the view.
+The flux axis is likewise anchored to the data and the accepted continuum,
+so a half-finished fit cannot rescale the plot. Stretches with no fit yet
+appear as breaks in the blue curve, marked along the bottom axis.
 
 **Continuum error band.** Every fit shows a 1-sigma uncertainty band
 (dashed lines + faint fill): node-based models propagate the uncertainty of

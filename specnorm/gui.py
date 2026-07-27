@@ -999,15 +999,22 @@ class ContinuumGUI:
         # fit blended together, with this window's fit previewed at top
         # precedence.  That is what will be written out, so joins that
         # did not knit well are visible from any window and at any zoom.
-        knit = knit_err = None
+        knit = knit_err = anchor_curve = None
         if w.size:
-            # An accepted window is already part of the knit, so show the
-            # true blended result; only a fit that has not been accepted
-            # yet is previewed at top precedence.
+            # An accepted window is already part of the knit; an
+            # unaccepted one is previewed only where nothing else covers.
             knit, knit_err, knit_ok = self.knitted(
                 w, preview=None if st.accepted else st)
             if not np.isfinite(knit).any():
                 knit = knit_err = None
+            # The axis is anchored to the accepted continuum alone, so a
+            # half-finished fit can never rescale the view.
+            if st.accepted:
+                anchor_curve = knit
+            else:
+                accepted_only, _ae, _ao = self.knitted(w)
+                anchor_curve = (accepted_only
+                                if np.isfinite(accepted_only).any() else None)
         if knit is not None:
             ax.plot(w, knit, color="tab:blue", lw=2, zorder=4,
                     label="continuum")
@@ -1026,17 +1033,22 @@ class ContinuumGUI:
                 ylo_h = np.nanmin(f[g]) if f[g].size else 0.0
                 ax.plot(w[hole], np.full(int(hole.sum()), ylo_h), "|",
                         color="0.6", ms=6, zorder=2, label="not fitted")
-        # This window's own model, drawn thin over its own span only, so
-        # you can see what you are editing against the knitted result.
-        if st.continuum is not None and knit is not None:
-            if not np.allclose(np.nan_to_num(st.continuum),
-                               np.nan_to_num(knit), rtol=1e-6, atol=0):
+        # This window's own model, drawn thin over its own span, so you
+        # can see what you are editing against the final result.  It is
+        # not allowed to influence the axis limits.
+        if st.continuum is not None:
+            same = (knit is not None
+                    and np.allclose(np.nan_to_num(st.continuum),
+                                    np.nan_to_num(knit), rtol=1e-6, atol=0))
+            if not same:
                 ax.plot(w, st.continuum, color="tab:purple", lw=1.0,
                         ls="--", alpha=0.85, zorder=5,
-                        label="this window's fit")
-        elif st.continuum is not None:
-            ax.plot(w, st.continuum, color="tab:blue", lw=2, zorder=4,
-                    label="continuum")
+                        label=("this window's fit"
+                               if st.accepted else
+                               "this window's fit (not accepted)"))
+            elif knit is None:
+                ax.plot(w, st.continuum, color="tab:blue", lw=2, zorder=4,
+                        label="continuum")
         if st.continuum is not None and st.rejected is not None \
                 and st.rejected.size == w.size and st.rejected.any():
             ax.plot(w[st.rejected], f[st.rejected], "x", color="tab:orange",
@@ -1046,11 +1058,10 @@ class ContinuumGUI:
         # --- y autoscale ignoring masked / bad points -------------------
         ax.set_xlim(st.w0, st.w1)
         ref = f[g]
-        for curve in (knit, st.continuum):
-            if curve is not None:
-                finite = curve[np.isfinite(curve)]
-                if finite.size:
-                    ref = np.concatenate([ref, finite])
+        if anchor_curve is not None:
+            finite = anchor_curve[np.isfinite(anchor_curve)]
+            if finite.size:
+                ref = np.concatenate([ref, finite])
         if ref.size:
             lo, hi = float(np.min(ref)), float(np.max(ref))
             pad = 0.07 * (hi - lo) if hi > lo else (abs(hi) * 0.1 or 1.0)
@@ -1058,8 +1069,8 @@ class ContinuumGUI:
             if self._y_zoom != 1.0:
                 # Zoom about the continuum level, not the middle of the
                 # range, so the continuum stays in view as you zoom in.
-                if knit is not None and np.isfinite(knit).any():
-                    anchor = float(np.nanmedian(knit))
+                if anchor_curve is not None and np.isfinite(anchor_curve).any():
+                    anchor = float(np.nanmedian(anchor_curve))
                 elif st.continuum is not None and np.isfinite(st.continuum).any():
                     anchor = float(np.nanmedian(st.continuum))
                 elif f[g].size:
@@ -1322,7 +1333,8 @@ class ContinuumGUI:
             # diverging neighbour could win by default.
             taper = np.clip(np.minimum(w - st.w0, st.w1 - w) / span,
                             0.0, None) + 0.02
-            recency = self.recency_base ** -(newest[sel] - seq)
+            recency = self.recency_base ** -np.clip(newest[sel] - seq,
+                                                    0.0, 60.0)
             # How much further than the best available candidate this
             # fit strays from the local flux level, in units of that
             # level: 0 for the closest fit, large for a runaway one.
@@ -1343,14 +1355,33 @@ class ContinuumGUI:
     def knitted(self, wave: np.ndarray, preview: Optional[WindowState] = None):
         """The knitted continuum on ``wave``, as it would be written out.
 
-        ``preview`` is a window whose fit is not (yet) accepted but
-        should take precedence, so the display can show exactly what
-        accepting it would produce.
+        This is always the *final* continuum: every accepted fit blended
+        together.  ``preview`` is a window whose fit has not been
+        accepted yet; it is added at the **lowest** precedence, so it
+        fills stretches nothing accepted covers but never overrides the
+        accepted result.  That keeps the displayed continuum stable
+        while you zoom and pan — changing the view cannot change what
+        the final fit looks like.  A preview is also confined to the
+        range its nodes actually constrain, so a narrow fit seen from a
+        zoomed-out window is not smeared across the view.
         """
         entries = [(s, s.accept_seq) for s in self.states
                    if s.accepted and s.fitter is not None and s is not preview]
         if preview is not None and preview.fitter is not None:
-            entries.append((preview, self._accept_seq))
+            p0, p1 = preview.w0, preview.w1
+            support = preview.fitter.support
+            if support is not None:
+                margin = self.overlap * (self.default_window
+                                         if self.default_window > 0
+                                         else (p1 - p0))
+                lo = max(p0, support[0] - margin)
+                hi = min(p1, support[1] + margin)
+                if hi > lo:
+                    p0, p1 = lo, hi
+            shim = WindowState(w0=p0, w1=p1, fitter=preview.fitter,
+                               fitter_kind=preview.fitter_kind,
+                               degree=preview.degree)
+            entries.append((shim, -1.0e9))
         cont, cerr, weight = self._blend(wave, entries)
         covered = weight > 0
         with np.errstate(invalid="ignore"):
