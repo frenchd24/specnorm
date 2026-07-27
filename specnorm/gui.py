@@ -197,8 +197,9 @@ class ContinuumGUI:
         self.node_box = node_box if node_box is not None else 0.005 * width
         # Zoom is geometric: each press scales the width by this factor,
         # so zooming in always works (a fixed step could never shrink a
-        # default-width window) and zooming out accelerates sensibly.
-        self.zoom_factor = 1.5
+        # default-width window).  Kept small so a press nudges the view
+        # rather than jumping it; hold the key to travel further.
+        self.zoom_factor = 1.125
         self.pan_frac = 0.25   # pan step as a fraction of current width
         self.min_window = max(5 * self.node_box,
                               0.05 * self.default_window)
@@ -218,7 +219,7 @@ class ContinuumGUI:
         # a fit controls in the knitted continuum.
         self._view_override = None
         self._view_idx = -1
-        self.y_zoom_factor = 1.4
+        self.y_zoom_factor = 1.1
         # In an overlap the more recently accepted fit dominates by this
         # factor per generation, so re-fitting a region supersedes what
         # was there before without a discontinuity.
@@ -1554,11 +1555,14 @@ class ContinuumGUI:
                                   cont_err=cerr, meta=meta)
 
 
-def load_session(path: str):
+def load_session(path: str, bin_override: Optional[int] = None,
+                 masked_path: Optional[str] = None):
     """Read a session file and rebuild the spectrum and GUI from it.
 
     Returns ``(gui, native_spectrum)`` where ``native_spectrum`` is the
     unbinned spectrum to write output on (None if no binning was used).
+    ``bin_override`` re-bins the spectrum by a different factor than the
+    session recorded, refitting every window on the new grid.
     """
     import json
     from .io import read_spectrum
@@ -1573,6 +1577,10 @@ def load_session(path: str):
     spec = read_spectrum(infile, ext=src.get("ext"))
     native = None
     nbin = int(src.get("bin", 1) or 1)
+    if bin_override is not None:
+        nbin = max(int(bin_override), 1)
+        src = dict(src)
+        src["bin"] = nbin
     if nbin > 1:
         native = spec
         spec = bin_spectrum(spec, nbin)
@@ -1587,6 +1595,7 @@ def load_session(path: str):
         node_box=cfg.get("node_box"),
         mask_dq=bool(cfg.get("mask_dq", True)),
         session_path=path,
+        masked_path=masked_path,
         source=src,
         **cfg.get("clip", {}))
     gui.restore_session(state)

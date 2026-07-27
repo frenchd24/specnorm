@@ -28,7 +28,7 @@ from .gui import (ContinuumGUI, normalize_interactive,
                   AIRGLOW_REGIONS, load_session)
 from .plotting import plot_overview
 
-__version__ = "0.19.0"
+__version__ = "0.20.0"
 
 __all__ = [
     "Spectrum",

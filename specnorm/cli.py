@@ -29,7 +29,8 @@ def out_root_for_session(args) -> str:
     return os.path.splitext(args.input)[0] + "_norm.fits"
 
 
-def _write_outputs(args, result, out) -> int:
+def _write_outputs(args, result, out, window=None, display_bin=1) -> int:
+    """Write outputs for a resumed session (fresh runs write inline)."""
     style = args.style
     if args.minimal:
         style = "minimal"
@@ -43,11 +44,13 @@ def _write_outputs(args, result, out) -> int:
         print("VoigtFit-ready output: MASK 1 = include in fit, 0 = exclude.")
         print("In your VoigtFit parameter file, remember the 'norm' keyword:")
         print(f"  data  '{out}'  <resolution>  norm")
+    if window is None:
+        window = args.window
     if not args.no_overview:
         ov_path = os.path.splitext(out)[0] + "_overview.pdf"
         plot_overview(result, ov_path, zoom=args.overview_zoom,
-                      window=args.window if args.window > 0 else None,
-                      overlap=args.overview_overlap)
+                      window=window if window and window > 0 else None,
+                      overlap=args.overview_overlap, bin=display_bin)
         print(f"Overview plot: {ov_path}")
     return 0
 
@@ -57,19 +60,31 @@ def _run_resumed(args) -> int:
     if not os.path.exists(args.resume):
         print(f"Session file not found: {args.resume}", file=sys.stderr)
         return 1
+    masked_out = args.masked_output
+    if masked_out is not None and masked_out.lower() == "none":
+        masked_out = None
     try:
-        gui, native = load_session(args.resume)
+        gui, native = load_session(args.resume, bin_override=args.nbin,
+                                   masked_path=masked_out)
     except (ValueError, KeyError, OSError) as exc:
         print(f"Could not read session {args.resume}: {exc}", file=sys.stderr)
         return 1
     n_acc = sum(s.accepted for s in gui.states)
+    nbin = int(gui.source.get("bin", 1) or 1)
     print(f"Resumed {args.resume}: {len(gui.states)} windows, "
           f"{n_acc} with accepted fits")
+    print(f"Read {len(gui.spec)} points "
+          f"[{gui.spec.wmin:.1f}-{gui.spec.wmax:.1f}]"
+          + (f", binned x{nbin} for fitting"
+             f"{' (changed by -b)' if args.nbin is not None else ''}"
+             if nbin > 1 else ", unbinned"))
+    if native is not None and not args.write_binned:
+        print(f"Output will be written on the native grid ({len(native)} px)")
     gaps = gui._coverage_gaps()
     print(f"{len(gaps)} region(s) still unfitted"
           if gaps else "All fittable regions are covered")
     result = gui.run()
-    if native is not None:
+    if native is not None and not args.write_binned:
         result = gui.assemble_on(native)
     if not any(w["accepted"] for w in result.meta["specnorm"]["windows"]):
         print("No windows accepted — nothing written.", file=sys.stderr)
@@ -78,7 +93,8 @@ def _run_resumed(args) -> int:
     if out is None:
         src = gui.source.get("input", "spectrum")
         out = os.path.splitext(src)[0] + "_norm.fits"
-    _write_outputs(args, result, out)
+    _write_outputs(args, result, out,
+                   window=gui.default_window, display_bin=nbin)
     print(f"Wrote {out}")
     return 0
 
@@ -112,11 +128,13 @@ def main(argv=None) -> int:
     parser.add_argument("-d", "--degree", type=int, default=3,
                         help="Initial polynomial/Chebyshev degree, 1-5 "
                              "(default 3)")
-    parser.add_argument("-b", "--bin", type=int, default=2, dest="nbin",
+    parser.add_argument("-b", "--bin", type=int, default=None, dest="nbin",
                         help="Bin the spectrum by N pixels for FITTING "
                              "(default 2; use 1 for no binning). The output "
                              "is written at native resolution regardless, "
-                             "unless --write-binned is given.")
+                             "unless --write-binned is given. With --resume, "
+                             "give it to change the binning of a saved "
+                             "session; omit it to keep what was saved.")
     parser.add_argument("--write-binned", action="store_true",
                         help="Write the binned spectrum instead of "
                              "evaluating the continuum on the native-"
@@ -190,6 +208,9 @@ def main(argv=None) -> int:
 
     if args.resume:
         return _run_resumed(args)
+
+    if args.nbin is None:
+        args.nbin = 2
 
     if not args.input:
         parser.error("an input spectrum is required unless --resume is used")
@@ -279,7 +300,8 @@ def main(argv=None) -> int:
         ov_path = os.path.splitext(out)[0] + "_overview.pdf"
         plot_overview(result, ov_path, zoom=args.overview_zoom,
                       window=args.window if args.window > 0 else None,
-                      overlap=args.overview_overlap)
+                      overlap=args.overview_overlap,
+                      bin=1 if args.write_binned else args.nbin)
         print(f"Overview plot: {ov_path}")
     if style == "voigt":
         print("VoigtFit-ready output: MASK 1 = include in fit, 0 = exclude.")

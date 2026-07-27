@@ -26,9 +26,39 @@ def _infer_window(result: NormalizedSpectrum) -> Optional[float]:
         return None
 
 
+def _bin_for_display(result: NormalizedSpectrum, nbin: int):
+    """Bin the arrays used for plotting (display only, never the output)."""
+    nbin = int(nbin)
+    n = (result.wavelength.size // nbin) * nbin
+    if nbin <= 1 or n == 0:
+        return (result.wavelength, result.flux, result.continuum,
+                result.cont_err, result.mask)
+
+    def _mean(a):
+        if a is None:
+            return None
+        block = np.asarray(a, dtype=float)[:n].reshape(-1, nbin)
+        with np.errstate(invalid="ignore"):
+            out = np.full(block.shape[0], np.nan)
+            good = np.isfinite(block)
+            any_good = good.any(axis=1)
+            if any_good.any():
+                out[any_good] = (np.nansum(np.where(good, block, 0.0), axis=1)
+                                 [any_good]
+                                 / good.sum(axis=1)[any_good])
+        return out
+
+    wave = np.asarray(result.wavelength)[:n].reshape(-1, nbin).mean(axis=1)
+    mask = None
+    if result.mask is not None:
+        mask = np.asarray(result.mask)[:n].reshape(-1, nbin).any(axis=1)
+    return (wave, _mean(result.flux), _mean(result.continuum),
+            _mean(result.cont_err), mask)
+
+
 def plot_overview(result: NormalizedSpectrum, path: str,
                   zoom: float = 3.0, window: Optional[float] = None,
-                  overlap: float = 0.15) -> str:
+                  overlap: float = 0.15, bin: int = 1) -> str:
     """Save an overview figure of flux + continuum.
 
     Parameters
@@ -49,6 +79,11 @@ def plot_overview(result: NormalizedSpectrum, path: str,
         Fraction of each panel repeated on the next one (default 0.15),
         so the right edge of one row can be matched to the left edge of
         the row below.  The shared stretch is tinted in both panels.
+    bin : int
+        Bin the spectrum by this many pixels *for display only*, so the
+        overview shows the same signal-to-noise you fitted against.
+        Pass the binning used while fitting; the written output is
+        unaffected.
 
     Returns
     -------
@@ -56,7 +91,8 @@ def plot_overview(result: NormalizedSpectrum, path: str,
     """
     import matplotlib.pyplot as plt
 
-    wave = result.wavelength
+    nbin = max(int(bin), 1)
+    wave, flux_d, cont_d, cerr_d, mask_d = _bin_for_display(result, nbin)
     if window is None:
         window = _infer_window(result)
 
@@ -85,17 +121,17 @@ def plot_overview(result: NormalizedSpectrum, path: str,
 
     def _draw_panel(ax, w0, w1, first=False, last=False):
         sel = (wave >= w0) & (wave <= w1)
-        w, f, c = wave[sel], result.flux[sel], result.continuum[sel]
+        w, f, c = wave[sel], flux_d[sel], cont_d[sel]
         good = np.isfinite(f)
-        if result.mask is not None:
-            good &= ~result.mask[sel].astype(bool)
+        if mask_d is not None:
+            good &= ~mask_d[sel].astype(bool)
         for (m0, m1) in fit_regions:   # fit masks shape the y-scale too
             good &= ~((w >= m0) & (w <= m1))
         ax.plot(w, f, color="0.35", lw=0.6, drawstyle="steps-mid",
-                label="flux")
+                label="flux" + (f" (binned x{nbin})" if nbin > 1 else ""))
         ax.plot(w, c, color="tab:blue", lw=1.6, label="continuum")
-        if result.cont_err is not None:
-            ce = result.cont_err[sel]
+        if cerr_d is not None:
+            ce = cerr_d[sel]
             band = np.isfinite(ce) & np.isfinite(c)
             if band.any():
                 ax.plot(w[band], (c + ce)[band], color="tab:blue", lw=0.8,

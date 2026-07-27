@@ -84,9 +84,9 @@ Use `--ext N` to force a specific FITS extension.
 | `s` | switch to cubic spline (interpolates through your nodes) |
 | `c` | switch to sigma-clipped Chebyshev (fits the data, rejects lines) |
 | `1`–`5` | set the degree of the current model (switches spline to polynomial) |
-| `+` / `-` | zoom the current window in / out (geometric, x1.5 per press, about the window centre) |
+| `+` / `-` | zoom the view in / out (geometric, ~12% per press, about the view centre) |
 | `←` / `→` | pan the window left / right by a quarter of its width, keeping the width |
-| `↑` / `↓` | zoom the flux axis in / out, about the continuum level so it stays in view |
+| `↑` / `↓` | zoom the flux axis in / out (~9% per press), about the continuum level so it stays in view |
 | `d` | drop other accepted fits overlapping this window, so a region can be redone from scratch |
 | `0` | reset the window to the default width and the flux scaling |
 | click the coverage strip | jump to the window at that wavelength |
@@ -313,7 +313,10 @@ together, with masked regions shaded. The spectrum is split into panels of
 **3x the fitting-window width** (so `-w 20` gives 60 A panels), up to four
 panels per PDF page. Consecutive panels **overlap by 15%** and the shared
 stretch is tinted grey in both rows with a dotted boundary, so you can see
-how the right edge of one row joins the left edge of the next. Tune the
+how the right edge of one row joins the left edge of the next. The flux is
+shown at **the same binning you fitted with** (`-b`), so the overview has the
+signal-to-noise you were judging the fit against; the written output is
+unaffected. From Python, pass `bin=` to `plot_overview`. Tune the
 panel width with `--overview-zoom`, the repeat with `--overview-overlap`, or
 skip the plot with `--no-overview`. From Python:
 `plot_overview(result, "overview.pdf", zoom=3.0, overlap=0.15)` — a `.png`
@@ -348,6 +351,13 @@ The spectrum is reopened, the masks reapplied and every window refit from its
 saved nodes, reproducing the previous continuum exactly, and the GUI opens on
 the first region still needing work. From Python, `load_session(path)` returns
 the rebuilt `(gui, native_spectrum)` pair.
+
+Binning is part of the session: resuming re-applies the `-b` factor the
+session was created with, refits on that grid, and still writes the output at
+native resolution. Pass `-b N` on the resume command line to *change* the
+binning — the spectrum is re-binned, every window refit on the new grid, and
+the new factor saved back. Resume reports what it is using, e.g.
+`Read 2000 points [1200.0-1260.0], binned x4 for fitting`.
 
 **A resumed session never closes itself** — you are editing, so it stays open
 however many regions you redo, until you press `q`. (A fresh run still closes
