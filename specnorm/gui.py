@@ -214,6 +214,12 @@ class ContinuumGUI:
         self.finish_when_complete = True
         self._knit_note = ""
         self._y_zoom = 1.0        # >1 zooms in on the continuum level
+        # The flux range you chose, as fractions of the continuum level
+        # below and above it.  Kept between windows so the flux zoom
+        # stays put; None means autoscale.
+        self._y_span = None
+        self._y_anchor = None
+        self._y_scale = None
         # The displayed range is tracked separately from each window's
         # governing span: looking around must never change which region
         # a fit controls in the knitted continuum.
@@ -630,17 +636,30 @@ class ContinuumGUI:
         self._draw(message=f"View [{new_v0:.2f}, {new_v1:.2f}]")
 
     def _zoom_y(self, direction: int):
-        """Zoom the flux axis in (direction>0) or out, about the continuum."""
-        if direction > 0:
-            self._y_zoom *= self.y_zoom_factor
-        else:
-            self._y_zoom = max(self._y_zoom / self.y_zoom_factor, 0.05)
+        """Zoom the flux axis in (direction>0) or out, about the continuum.
+
+        The chosen range is stored relative to the continuum level, so
+        it carries over to the next window rather than snapping back to
+        that window's autoscale.
+        """
+        factor = (self.y_zoom_factor if direction > 0
+                  else 1.0 / self.y_zoom_factor)
+        self._y_zoom = max(self._y_zoom * factor, 0.05)
+        lo, hi = self._ax.get_ylim()
+        anchor = self._y_anchor if self._y_anchor is not None else 0.5 * (lo + hi)
+        scale = self._y_scale if self._y_scale else max(hi - lo, 1e-30)
+        anchor = min(max(anchor, lo), hi)
+        self._y_span = (((anchor - lo) / factor) / scale,
+                        ((hi - anchor) / factor) / scale)
+        if abs(self._y_zoom - 1.0) < 1e-9:
+            self._y_span = None      # back to autoscale everywhere
         self._draw(message=f"y-zoom x{self._y_zoom:.2f}"
-                           + ("  (0 resets)" if self._y_zoom != 1.0 else ""))
+                           + ("  (0 resets)" if self._y_span is not None else ""))
 
     def _reset_window(self):
         """Drop any zoom or pan: show exactly what this window governs."""
         self._y_zoom = 1.0
+        self._y_span = None
         self._view_override = None
         self._view_width = None
         self._draw(message="View reset to this window's range")
@@ -1154,20 +1173,26 @@ class ContinuumGUI:
             lo, hi = float(np.min(ref)), float(np.max(ref))
             pad = 0.07 * (hi - lo) if hi > lo else (abs(hi) * 0.1 or 1.0)
             lo, hi = lo - pad, hi + pad
-            if self._y_zoom != 1.0:
-                # Zoom about the continuum level, not the middle of the
-                # range, so the continuum stays in view as you zoom in.
-                if anchor_curve is not None and np.isfinite(anchor_curve).any():
-                    anchor = float(np.nanmedian(anchor_curve))
-                elif st.continuum is not None and np.isfinite(st.continuum).any():
-                    anchor = float(np.nanmedian(st.continuum))
-                elif f[g].size:
-                    anchor = float(np.median(f[g]))
-                else:
-                    anchor = 0.5 * (lo + hi)
-                anchor = min(max(anchor, lo), hi)
-                lo = anchor - (anchor - lo) / self._y_zoom
-                hi = anchor + (hi - anchor) / self._y_zoom
+            # Everything is measured about the continuum level, so the
+            # continuum stays in view and the same flux zoom means the
+            # same thing from one window to the next.
+            if anchor_curve is not None and np.isfinite(anchor_curve).any():
+                anchor = float(np.nanmedian(anchor_curve))
+            elif st.continuum is not None and np.isfinite(st.continuum).any():
+                anchor = float(np.nanmedian(st.continuum))
+            elif f[g].size:
+                anchor = float(np.median(f[g]))
+            else:
+                anchor = 0.5 * (lo + hi)
+            anchor = min(max(anchor, lo), hi)
+            scale = abs(anchor) if abs(anchor) > 0 else max(hi - lo, 1e-30)
+            self._y_anchor, self._y_scale = anchor, scale
+            if self._y_span is not None:
+                # A flux zoom you chose earlier: reapply it as the same
+                # fraction of the continuum level here, so windows with
+                # very different auto-ranges still look alike.
+                below, above = self._y_span
+                lo, hi = anchor - below * scale, anchor + above * scale
             ax.set_ylim(lo, hi)
 
         model = {"spline": "spline (nodes)",

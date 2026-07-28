@@ -86,7 +86,7 @@ Use `--ext N` to force a specific FITS extension.
 | `1`–`5` | set the degree of the current model (switches spline to polynomial) |
 | `+` / `-` | zoom the view in / out (geometric, ~3% per press, about the view centre) |
 | `←` / `→` | pan the window left / right by a quarter of its width, keeping the width |
-| `↑` / `↓` | zoom the flux axis in / out (~9% per press), about the continuum level so it stays in view |
+| `↑` / `↓` | zoom the flux axis in / out (~9% per press), about the continuum level so it stays in view and the zoom means the same thing in every window |
 | `d` | drop other accepted fits overlapping this window, so a region can be redone from scratch |
 | `0` | restore automatic view sizing and the flux scaling |
 | click the coverage strip | jump to the window at that wavelength |
@@ -137,7 +137,16 @@ restores the default view. Zoom is geometric
 (x1.5 per press) about the window centre, so repeated presses scale smoothly
 in both directions.
 
-**The zoom level stays where you put it.** Once you zoom or pan, that width
+**Both zooms stay where you put them.** The flux zoom is stored as a
+fraction of the *continuum level*, not as an absolute flux range, so it means
+the same thing from one window to the next and follows a continuum that rises
+or falls across the spectrum. That matters because autoscaling alone is wildly
+inconsistent: a window containing a deep absorption line can autoscale to ten
+times the range of its neighbours, so the same nominal zoom looks completely
+different. `0` hands back autoscaling, and zooming back out to x1 releases the
+lock on its own.
+
+**The view width stays where you put it too.** Once you zoom or pan, that width
 is carried over to the next window you visit, so accepting a fit no longer
 snaps the view sharply in when the next window happens to be narrow (a
 trimmed wing in a resumed session, say). A carried width only changes what
