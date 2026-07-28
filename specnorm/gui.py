@@ -200,7 +200,7 @@ class ContinuumGUI:
         # default-width window).  Kept small so a press nudges the view
         # rather than jumping it; hold the key to travel further.
         self.zoom_factor = 1.03125
-        self.pan_frac = 0.25   # pan step as a fraction of current width
+        self.pan_frac = 0.125  # pan step as a fraction of current width
         self.min_window = max(5 * self.node_box,
                               0.05 * self.default_window)
 
@@ -214,12 +214,16 @@ class ContinuumGUI:
         self.finish_when_complete = True
         self._knit_note = ""
         self._y_zoom = 1.0        # >1 zooms in on the continuum level
-        # The flux range you chose, in flux units.  Once set it is used
-        # verbatim in every window until you change it or press 0, so
-        # the axis never moves under you.  None means autoscale.
-        self._y_limits = None
+        # The flux range you chose: its *height* in flux units, plus any
+        # offset you gave it from the middle of the data.  The height is
+        # held constant between windows so the zoom stays put, while the
+        # centre follows the flux so the spectrum stays on screen.
+        # None means autoscale.
+        self._y_height = None
+        self._y_offset = 0.0
         self._y_applied = None    # what we last set, to detect toolbar zooms
-        self._y_anchor = None
+        self._y_anchor = None     # continuum level, for zooming about it
+        self._y_centre = None     # middle of the flux in view
         # The displayed range is tracked separately from each window's
         # governing span: looking around must never change which region
         # a fit controls in the knitted continuum.
@@ -651,15 +655,19 @@ class ContinuumGUI:
         anchor = self._y_anchor
         if anchor is None or not (lo <= anchor <= hi):
             anchor = 0.5 * (lo + hi)
-        self._y_limits = (anchor - (anchor - lo) / factor,
-                          anchor + (hi - anchor) / factor)
-        self._draw(message=f"flux range {self._y_limits[0]:.3g} to "
-                           f"{self._y_limits[1]:.3g}  (0 resets)")
+        new_lo = anchor - (anchor - lo) / factor
+        new_hi = anchor + (hi - anchor) / factor
+        self._y_height = new_hi - new_lo
+        centre_ref = self._y_centre if self._y_centre is not None else anchor
+        self._y_offset = 0.5 * (new_lo + new_hi) - centre_ref
+        self._draw(message=f"flux range {new_hi - new_lo:.3g} tall "
+                           f"({new_lo:.3g} to {new_hi:.3g})  (0 resets)")
 
     def _reset_window(self):
         """Drop any zoom or pan: show exactly what this window governs."""
         self._y_zoom = 1.0
-        self._y_limits = None
+        self._y_height = None
+        self._y_offset = 0.0
         self._view_override = None
         self._view_width = None
         self._draw(message="View reset to this window's range")
@@ -1047,7 +1055,10 @@ class ContinuumGUI:
             span = abs(self._y_applied[1] - self._y_applied[0]) or 1.0
             if (abs(current[0] - self._y_applied[0]) > 1e-6 * span
                     or abs(current[1] - self._y_applied[1]) > 1e-6 * span):
-                self._y_limits = (float(current[0]), float(current[1]))
+                self._y_height = float(current[1] - current[0])
+                centre_ref = (self._y_centre if self._y_centre is not None
+                              else 0.5 * (current[0] + current[1]))
+                self._y_offset = 0.5 * (current[0] + current[1]) - centre_ref
         ax.clear()
         v0, v1 = self._view_range()
         sel = self._view_sel()
@@ -1173,11 +1184,11 @@ class ContinuumGUI:
 
         # --- y autoscale ignoring masked / bad points -------------------
         ax.set_xlim(v0, v1)
+        # Autoscale to the *flux*: including the continuum here let a fit
+        # that runs away at a window edge drag the whole axis with it.
         ref = f[g]
-        if anchor_curve is not None:
-            finite = anchor_curve[np.isfinite(anchor_curve)]
-            if finite.size:
-                ref = np.concatenate([ref, finite])
+        if not ref.size and anchor_curve is not None:
+            ref = anchor_curve[np.isfinite(anchor_curve)]
         if ref.size:
             lo, hi = float(np.min(ref)), float(np.max(ref))
             pad = 0.07 * (hi - lo) if hi > lo else (abs(hi) * 0.1 or 1.0)
@@ -1193,13 +1204,15 @@ class ContinuumGUI:
                 anchor = float(np.median(f[g]))
             else:
                 anchor = 0.5 * (lo + hi)
-            anchor = min(max(anchor, lo), hi)
-            self._y_anchor = anchor
-            if self._y_limits is not None:
-                # A range you set: use it exactly, in every window, until
-                # you change it.  Deriving it from each window's own data
-                # is what made the axis jump about.
-                lo, hi = self._y_limits
+            self._y_anchor = min(max(anchor, lo), hi)
+            # Middle of the flux on show: what a fixed-height range is
+            # centred on, so the spectrum cannot drift off the axis.
+            self._y_centre = (float(np.median(f[g])) if f[g].size
+                              else 0.5 * (lo + hi))
+            if self._y_height is not None:
+                centre = self._y_centre + self._y_offset
+                lo = centre - 0.5 * self._y_height
+                hi = centre + 0.5 * self._y_height
             ax.set_ylim(lo, hi)
             self._y_applied = (lo, hi)
 

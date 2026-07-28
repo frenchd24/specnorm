@@ -85,8 +85,8 @@ Use `--ext N` to force a specific FITS extension.
 | `c` | switch to sigma-clipped Chebyshev (fits the data, rejects lines) |
 | `1`–`5` | set the degree of the current model (switches spline to polynomial) |
 | `+` / `-` | zoom the view in / out (geometric, ~3% per press, about the view centre) |
-| `←` / `→` | pan the window left / right by a quarter of its width, keeping the width |
-| `↑` / `↓` | zoom the flux axis in / out (~9% per press) about the continuum; the resulting range then stays fixed in every window until you change it |
+| `←` / `→` | pan the view left / right by an eighth of its width, keeping the width |
+| `↑` / `↓` | zoom the flux axis in / out (~9% per press) about the continuum; the resulting height is then kept in every window, centred on the flux |
 | `d` | drop other accepted fits overlapping this window, so a region can be redone from scratch |
 | `0` | restore automatic view sizing and the flux scaling |
 | click the coverage strip | jump to the window at that wavelength |
@@ -137,14 +137,18 @@ restores the default view. Zoom is geometric
 (x1.5 per press) about the window centre, so repeated presses scale smoothly
 in both directions.
 
-**Both zooms stay where you put them.** Once you set a flux range — with
-the up/down keys or with matplotlib's own zoom tool — that exact range is used
-in every window until you change it or press `0`. It is stored in flux units,
-not derived from each window's data, because deriving it is what made the axis
-jump: autoscaling alone swings enormously between windows (a deep absorption
-line, or a stretch of dead pixels, can move the range by orders of magnitude),
-and anchoring it to the fitted continuum fails wherever that continuum
-estimate collapses. `0` hands back autoscaling.
+**Both zooms stay where you put them.** Once you set a flux range — with the
+up/down keys or with matplotlib's own zoom tool — its *height* is held in
+every window until you change it or press `0`, so the zoom level never shifts
+under you. The *centre* follows the median flux on screen, so the spectrum
+stays visible as the continuum rises or falls across the spectrum, and a
+window of dead pixels shows its data rather than an empty axis. Any offset you
+deliberately gave the range is preserved on top of that. `0` hands back
+autoscaling.
+
+Autoscaling itself is driven by the **flux**, never the continuum: including
+the fitted continuum let a high-order fit that runs away at a window edge drag
+the whole axis with it.
 
 **The view width stays where you put it too.** Once you zoom or pan, that width
 is carried over to the next window you visit, so accepting a fit no longer
