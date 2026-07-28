@@ -86,7 +86,7 @@ Use `--ext N` to force a specific FITS extension.
 | `1`–`5` | set the degree of the current model (switches spline to polynomial) |
 | `+` / `-` | zoom the view in / out (geometric, ~3% per press, about the view centre) |
 | `←` / `→` | pan the window left / right by a quarter of its width, keeping the width |
-| `↑` / `↓` | zoom the flux axis in / out (~9% per press), about the continuum level so it stays in view and the zoom means the same thing in every window |
+| `↑` / `↓` | zoom the flux axis in / out (~9% per press) about the continuum; the resulting range then stays fixed in every window until you change it |
 | `d` | drop other accepted fits overlapping this window, so a region can be redone from scratch |
 | `0` | restore automatic view sizing and the flux scaling |
 | click the coverage strip | jump to the window at that wavelength |
@@ -137,14 +137,14 @@ restores the default view. Zoom is geometric
 (x1.5 per press) about the window centre, so repeated presses scale smoothly
 in both directions.
 
-**Both zooms stay where you put them.** The flux zoom is stored as a
-fraction of the *continuum level*, not as an absolute flux range, so it means
-the same thing from one window to the next and follows a continuum that rises
-or falls across the spectrum. That matters because autoscaling alone is wildly
-inconsistent: a window containing a deep absorption line can autoscale to ten
-times the range of its neighbours, so the same nominal zoom looks completely
-different. `0` hands back autoscaling, and zooming back out to x1 releases the
-lock on its own.
+**Both zooms stay where you put them.** Once you set a flux range — with
+the up/down keys or with matplotlib's own zoom tool — that exact range is used
+in every window until you change it or press `0`. It is stored in flux units,
+not derived from each window's data, because deriving it is what made the axis
+jump: autoscaling alone swings enormously between windows (a deep absorption
+line, or a stretch of dead pixels, can move the range by orders of magnitude),
+and anchoring it to the fitted continuum fails wherever that continuum
+estimate collapses. `0` hands back autoscaling.
 
 **The view width stays where you put it too.** Once you zoom or pan, that width
 is carried over to the next window you visit, so accepting a fit no longer
