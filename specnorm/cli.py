@@ -89,10 +89,25 @@ def _run_resumed(args) -> int:
     if not any(w["accepted"] for w in result.meta["specnorm"]["windows"]):
         print("No windows accepted — nothing written.", file=sys.stderr)
         return 1
-    out = args.output
+    saved_out = gui.output_options
+    out = args.output or saved_out.get("output")
     if out is None:
         src = gui.source.get("input", "spectrum")
         out = os.path.splitext(src)[0] + "_norm.fits"
+    # Command-line flags win; anything not given falls back to how the
+    # session was originally written.
+    if not args.plain and saved_out.get("plain"):
+        args.plain = True
+    if args.style == "voigt" and saved_out.get("style"):
+        args.style = saved_out["style"]
+    if not args.full and saved_out.get("full"):
+        args.full = True
+    if not args.minimal and saved_out.get("minimal"):
+        args.minimal = True
+    if args.plain and out.lower().endswith((".fits", ".fit", ".fts")):
+        print("Note: --plain applies to text output; writing FITS to "
+              f"{out}. Give -o with a text extension for plain output.",
+              file=sys.stderr)
     _write_outputs(args, result, out,
                    window=gui.default_window, display_bin=nbin)
     print(f"Wrote {out}")
@@ -266,6 +281,13 @@ def main(argv=None) -> int:
         session_path=session_out,
         source={"input": os.path.abspath(args.input), "ext": ext,
                 "bin": args.nbin},
+        output_options={"output": os.path.abspath(out) if
+                        (out := (args.output or
+                                 os.path.splitext(args.input)[0] + "_norm.fits"))
+                        else None,
+                        "style": args.style, "plain": bool(args.plain),
+                        "full": bool(args.full), "minimal": bool(args.minimal),
+                        "write_binned": bool(args.write_binned)},
     )
     if session_out:
         print(f"Session saved: {session_out}")

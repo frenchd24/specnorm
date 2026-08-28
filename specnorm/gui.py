@@ -166,6 +166,7 @@ class ContinuumGUI:
                  exclude_regions=None,
                  masked_path: Optional[str] = None,
                  session_path: Optional[str] = None,
+                 output_options: Optional[dict] = None,
                  low_rej: float = 1.5, high_rej: float = 3.5,
                  niterate: int = 20, grow: int = 6, min_pix: int = 3,
                  source: Optional[dict] = None):
@@ -176,6 +177,10 @@ class ContinuumGUI:
         self.masked_path = masked_path
         self.session_path = session_path
         self.source = dict(source or {})
+        # How the outputs were requested (path, style, plain, ...), so a
+        # resumed session writes the same files rather than falling back
+        # to defaults -- which silently turned --plain into a FITS file.
+        self.output_options = dict(output_options or {})
         self.clip = dict(low_rej=low_rej, high_rej=high_rej,
                          niterate=niterate, grow=grow, min_pix=min_pix)
         for (m0, m1) in (mask_regions or []):
@@ -220,7 +225,7 @@ class ContinuumGUI:
         # centre follows the flux so the spectrum stays on screen.
         # None means autoscale.
         self._y_height = None
-        self._y_offset = 0.0
+        self._y_limits = None
         self._y_applied = None    # what we last set, to detect toolbar zooms
         self._y_anchor = None     # continuum level, for zooming about it
         self._y_centre = None     # middle of the flux in view
@@ -386,6 +391,7 @@ class ContinuumGUI:
                 self._refresh_good()
                 self._invalidate_fits(w0, w1)
                 label = ("fit-masked" if kind == "fit" else "EXCLUDED")
+                self._save_session()
                 self._draw(message=f"{label} [{w0:.2f}, {w1:.2f}]")
         elif event.button == 3:
             # Undo: first cancel a pending first edge, otherwise remove
@@ -405,6 +411,7 @@ class ContinuumGUI:
             self._invalidate_fits(m0, m1)
             key = ("fit_mask_regions" if kind == "fit" else "exclude_regions")
             n_left = len(self.spec.meta.get(key, []))
+            self._save_session()
             self._draw(message=f"Removed {kind} mask [{m0:.2f}, {m1:.2f}] "
                                f"({n_left} remaining)")
 
@@ -650,24 +657,20 @@ class ContinuumGUI:
                   else 1.0 / self.y_zoom_factor)
         self._y_zoom = max(self._y_zoom * factor, 0.05)
         lo, hi = self._ax.get_ylim()
-        # Zoom about the continuum when it is in view, otherwise the
-        # middle of the current range.
-        anchor = self._y_anchor
-        if anchor is None or not (lo <= anchor <= hi):
-            anchor = 0.5 * (lo + hi)
-        new_lo = anchor - (anchor - lo) / factor
-        new_hi = anchor + (hi - anchor) / factor
-        self._y_height = new_hi - new_lo
-        centre_ref = self._y_centre if self._y_centre is not None else anchor
-        self._y_offset = 0.5 * (new_lo + new_hi) - centre_ref
-        self._draw(message=f"flux range {new_hi - new_lo:.3g} tall "
-                           f"({new_lo:.3g} to {new_hi:.3g})  (0 resets)")
+        # The bottom stays where it is (zero, or below it if the data go
+        # negative); zooming moves the top.  Working from the stored
+        # height keeps up and down exactly reversible.
+        base = self._y_height if self._y_height is not None else (hi - lo)
+        self._y_height = max(base / factor, 1e-30)
+        self._y_limits = None
+        self._draw(message=f"flux axis 0 to {lo + self._y_height:.3g}"
+                           "  (0 resets)")
 
     def _reset_window(self):
         """Drop any zoom or pan: show exactly what this window governs."""
         self._y_zoom = 1.0
         self._y_height = None
-        self._y_offset = 0.0
+        self._y_limits = None
         self._view_override = None
         self._view_width = None
         self._draw(message="View reset to this window's range")
@@ -1055,10 +1058,10 @@ class ContinuumGUI:
             span = abs(self._y_applied[1] - self._y_applied[0]) or 1.0
             if (abs(current[0] - self._y_applied[0]) > 1e-6 * span
                     or abs(current[1] - self._y_applied[1]) > 1e-6 * span):
-                self._y_height = float(current[1] - current[0])
-                centre_ref = (self._y_centre if self._y_centre is not None
-                              else 0.5 * (current[0] + current[1]))
-                self._y_offset = 0.5 * (current[0] + current[1]) - centre_ref
+                # An explicit range from the zoom tool is honoured as
+                # given, bottom included.
+                self._y_limits = (float(current[0]), float(current[1]))
+                self._y_height = None
         ax.clear()
         v0, v1 = self._view_range()
         sel = self._view_sel()
@@ -1068,18 +1071,22 @@ class ContinuumGUI:
         masked = self.spec.mask[sel]
         excluded = self.spec.exclude[sel]
 
-        ax.plot(w[g], f[g], color="0.2", lw=0.8, drawstyle="steps-mid",
-                label="flux")
-        bad = ~g & ~masked
+        # Plot on the full grid with NaN outside each subset, so a line
+        # never bridges the pixels in between: joining the good pixels
+        # either side of a mask drew a straight line across it that
+        # looked like invented data.
+        ax.plot(w, np.where(g, f, np.nan), color="0.2", lw=0.8,
+                drawstyle="steps-mid", label="flux")
+        bad = ~g & ~masked & ~excluded
         if bad.any():
             ax.plot(w[bad], f[bad], ".", color="0.75", ms=3, label="bad (DQ)")
         if masked.any():
-            ax.plot(w[masked], f[masked], color="darkorange", lw=0.6,
-                    alpha=0.7, drawstyle="steps-mid",
+            ax.plot(w, np.where(masked, f, np.nan), color="darkorange",
+                    lw=0.6, alpha=0.7, drawstyle="steps-mid",
                     label="fit-masked (kept in output)")
         if excluded.any():
-            ax.plot(w[excluded], f[excluded], color="lightcoral", lw=0.6,
-                    alpha=0.6, drawstyle="steps-mid",
+            ax.plot(w, np.where(excluded, f, np.nan), color="lightcoral",
+                    lw=0.6, alpha=0.6, drawstyle="steps-mid",
                     label="excluded (masked in output)")
         for (m0, m1) in self.spec.meta.get("fit_mask_regions", []):
             if m1 >= v0 and m0 <= v1:
@@ -1192,7 +1199,10 @@ class ContinuumGUI:
         if ref.size:
             lo, hi = float(np.min(ref)), float(np.max(ref))
             pad = 0.07 * (hi - lo) if hi > lo else (abs(hi) * 0.1 or 1.0)
-            lo, hi = lo - pad, hi + pad
+            hi = hi + pad
+            # Pin the bottom to zero (or below, if the data go negative)
+            # so the cores of saturated lines are never cut off.
+            lo = min(0.0, lo - pad)
             # Everything is measured about the continuum level, so the
             # continuum stays in view and the same flux zoom means the
             # same thing from one window to the next.
@@ -1204,15 +1214,19 @@ class ContinuumGUI:
                 anchor = float(np.median(f[g]))
             else:
                 anchor = 0.5 * (lo + hi)
+            raw_anchor = anchor
             self._y_anchor = min(max(anchor, lo), hi)
             # Middle of the flux on show: what a fixed-height range is
             # centred on, so the spectrum cannot drift off the axis.
             self._y_centre = (float(np.median(f[g])) if f[g].size
                               else 0.5 * (lo + hi))
-            if self._y_height is not None:
-                centre = self._y_centre + self._y_offset
-                lo = centre - 0.5 * self._y_height
-                hi = centre + 0.5 * self._y_height
+            if self._y_limits is not None:
+                lo, hi = self._y_limits          # an explicit range you set
+            else:
+                if self._y_height is not None:
+                    # Keep the height you chose, still anchored at zero.
+                    hi = lo + self._y_height
+                self._y_anchor = min(max(raw_anchor, lo), hi)
             ax.set_ylim(lo, hi)
             self._y_applied = (lo, hi)
 
@@ -1306,6 +1320,7 @@ class ContinuumGUI:
                 "node_box": self.node_box,
                 "clip": dict(self.clip),
             },
+            "output": dict(self.output_options),
             "fit_mask_regions": [list(r) for r in
                                  self.spec.meta.get("fit_mask_regions", [])],
             "exclude_regions": [list(r) for r in
@@ -1341,6 +1356,8 @@ class ContinuumGUI:
 
     def restore_session(self, state: dict, refit: bool = True):
         """Rebuild windows, masks and fits from :meth:`session_state`."""
+        if not self.output_options:
+            self.output_options = dict(state.get("output", {}))
         for key, kind in (("fit_mask_regions", "fit"),
                           ("exclude_regions", "exclude")):
             for (m0, m1) in state.get(key, []):

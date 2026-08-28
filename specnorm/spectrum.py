@@ -130,11 +130,24 @@ class Spectrum:
 
         ``kind='fit'`` (default) hides the range from the continuum fit
         only; ``kind='exclude'`` also flags it as bad in the output.
+
+        A new region that overlaps or touches existing ones of the same
+        kind is merged with them into a single region, so masking the
+        same stretch twice leaves one entry rather than a pile of
+        fragments (and undoing it removes the whole thing).
         """
         arr, regions = self._kind(kind)
         w0, w1 = sorted((float(w0), float(w1)))
         arr |= (self.wavelength >= w0) & (self.wavelength <= w1)
-        regions.append([w0, w1])
+        merged = [w0, w1]
+        kept = []
+        for (a, b) in regions:
+            if a <= merged[1] and b >= merged[0]:      # overlaps or touches
+                merged = [min(a, merged[0]), max(b, merged[1])]
+            else:
+                kept.append([a, b])
+        kept.append(merged)                            # newest last, for undo
+        regions[:] = kept
 
     def pop_mask_region(self, kind: str = "fit"):
         """Remove the most recently added region of ``kind`` (LIFO undo).

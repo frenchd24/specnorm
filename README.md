@@ -86,7 +86,7 @@ Use `--ext N` to force a specific FITS extension.
 | `1`–`5` | set the degree of the current model (switches spline to polynomial) |
 | `+` / `-` | zoom the view in / out (geometric, ~3% per press, about the view centre) |
 | `←` / `→` | pan the view left / right by an eighth of its width, keeping the width |
-| `↑` / `↓` | zoom the flux axis in / out (~9% per press) about the continuum; the resulting height is then kept in every window, centred on the flux |
+| `↑` / `↓` | move the top of the flux axis down / up (~9% per press); the bottom stays at zero and the height is kept in every window |
 | `d` | drop other accepted fits overlapping this window, so a region can be redone from scratch |
 | `0` | restore automatic view sizing and the flux scaling |
 | click the coverage strip | jump to the window at that wavelength |
@@ -137,14 +137,14 @@ restores the default view. Zoom is geometric
 (x1.5 per press) about the window centre, so repeated presses scale smoothly
 in both directions.
 
-**Both zooms stay where you put them.** Once you set a flux range — with the
-up/down keys or with matplotlib's own zoom tool — its *height* is held in
-every window until you change it or press `0`, so the zoom level never shifts
-under you. The *centre* follows the median flux on screen, so the spectrum
-stays visible as the continuum rises or falls across the spectrum, and a
-window of dead pixels shows its data rather than an empty axis. Any offset you
-deliberately gave the range is preserved on top of that. `0` hands back
-autoscaling.
+**Both zooms stay where you put them.** The flux axis is anchored at zero
+(or below it, if the data go negative), so the cores of saturated absorption
+lines are never cut off; the up/down keys move the *top* of the axis, and the
+height you choose is then held in every window until you change it or press
+`0`. Anchoring at zero also makes autoscaling far steadier from window to
+window. If you want an arbitrary range instead — to inspect the continuum
+closely, say — set it with matplotlib's own zoom tool and it is honoured
+verbatim, bottom included, and survives redraws. `0` hands back autoscaling.
 
 Autoscaling itself is driven by the **flux**, never the continuum: including
 the fitted continuum let a high-order fit that runs away at a window edge drag
@@ -231,6 +231,13 @@ flattens the window), but they differ in what reaches the output:
   written with `MASK = 0` in every output file, so downstream tools skip
   them. `--airglow` adds its regions as exclusions, since airglow-filled
   pixels are contamination rather than signal.
+
+Overlapping or touching mask regions of the same kind are merged into one, so
+masking the same stretch twice leaves a single region and undoing it removes
+the whole thing. Masked data are drawn as they really are, with the line
+broken over the masked stretch rather than bridged across it. Every mask
+change is written to the session file immediately, so masking work cannot be
+lost.
 
 Masking a region drops any nodes inside it and un-accepts affected windows so
 they get refit. Both region lists are recorded in the output headers, and the
@@ -368,6 +375,11 @@ written the output:
 ```bash
 specnorm --resume myspectrum_norm_session.json
 ```
+
+The session also records how the outputs were written — path, style, `--plain`
+and so on — so resuming rewrites the same files instead of falling back to a
+default FITS name (which silently ignored `--plain`). Flags given on the resume
+command line still win.
 
 The spectrum is reopened, the masks reapplied and every window refit from its
 saved nodes, reproducing the previous continuum exactly, and the GUI opens on
