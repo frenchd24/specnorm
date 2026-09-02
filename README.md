@@ -163,9 +163,12 @@ The fit follows the view: it is re-evaluated from the fitted model whenever
 you zoom, pan, or move between windows, so a continuum you have fitted stays
 visible (and the title reports `no fit yet` / `fitted, not accepted` /
 `ACCEPTED` so you always know where a window stands). Changing a model to
-one that cannot be fitted with the nodes available — say pressing `5` with
-three nodes placed — reverts to the previous model rather than discarding
-your fit.
+one that cannot be fitted with what is available — say pressing `5` with three
+nodes placed — reverts to the previous model rather than discarding your fit,
+and says which requirement was not met. Nodes narrow the range a Chebyshev fit
+uses, but only when they actually overlap the window: a window trimmed by
+knitting can end up beside its own nodes, and intersecting the two would leave
+nothing to fit at all.
 
 **Knitting.** Accepting a window fits it in among the ones already there
 rather than competing with them. The window you just accepted takes

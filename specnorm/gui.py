@@ -986,12 +986,14 @@ class ContinuumGUI:
         prev = (st.fitter_kind, st.degree, st.fitter, st.continuum,
                 st.cont_err, st.rejected, st.accepted)
         st.fitter_kind, st.degree = kind, degree
-        self._fit_current(quiet=True)
+        reason = self._fit_window(st)
         if st.fitter is None and prev[2] is not None:
             (st.fitter_kind, st.degree, st.fitter, st.continuum,
              st.cont_err, st.rejected, st.accepted) = prev
             self._draw(message=f"Kept {prev[2].label()} — "
-                               f"not enough nodes for the requested model")
+                               + (reason or "the requested model would not fit"))
+        else:
+            self._draw(message=reason or "")
 
     def _fit_window(self, st: WindowState) -> Optional[str]:
         """Fit one window in place.  Returns an error message or None.
@@ -1007,14 +1009,23 @@ class ContinuumGUI:
             # Chebyshev: fit the unmasked data directly, sigma-clipping
             # outliers.  Nodes (if >= 2) restrict the fitted range.
             use = sel & self.good
+            need = st.degree + 2
             if len(st.nodes_x) >= 2:
+                # Nodes narrow the fitted range -- but only if that
+                # leaves something to fit.  A window trimmed by knitting
+                # can end up beside its own nodes, and intersecting with
+                # them would leave nothing at all.
                 x0, x1 = min(st.nodes_x), max(st.nodes_x)
-                use &= (self.spec.wavelength >= x0) & (self.spec.wavelength <= x1)
+                narrowed = use & (self.spec.wavelength >= x0) \
+                    & (self.spec.wavelength <= x1)
+                if int(narrowed.sum()) >= need:
+                    use = narrowed
             n_use = int(use.sum())
-            if n_use < st.degree + 2:
+            if n_use < need:
                 self._clear_fit(st)
-                return (f"Need >= {st.degree + 2} unmasked points "
-                        f"for {fitter.label()} ({n_use} available)")
+                return (f"{fitter.label()} needs >= {need} usable points; "
+                        f"this window has {n_use}"
+                        + (" (all masked or dead?)" if n_use == 0 else ""))
             err = self.spec.error[use]
             init_x = st.nodes_x if st.nodes_x else None
             init_y = st.nodes_y if st.nodes_x else None
