@@ -85,7 +85,8 @@ Use `--ext N` to force a specific FITS extension.
 | `c` | switch to sigma-clipped Chebyshev (fits the data, rejects lines) |
 | `1`–`5` | set the degree of the current model (switches spline to polynomial) |
 | `+` / `-` | zoom the view in / out (geometric, ~3% per press, about the view centre) |
-| `←` / `→` | pan the view left / right by an eighth of its width, keeping the width |
+| `←` / `→` | nudge the view left / right by ~1% of its width — for easing an edge onto the right pixel |
+| `shift`+`←` / `→` | pan by an eighth of the width (ten nudges' worth) for covering ground |
 | `↑` / `↓` | move the top of the flux axis down / up (~9% per press); the bottom stays at zero and the height is kept in every window |
 | `d` | drop other accepted fits overlapping this window, so a region can be redone from scratch |
 | `0` | restore automatic view sizing and the flux scaling |

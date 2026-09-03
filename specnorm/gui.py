@@ -17,11 +17,12 @@ nodes:
 * **left-click** (normal mode) drops a continuum node — the node's flux
   is the median *unmasked* flux within a small box around the click;
 * **right-click** (normal mode) deletes the nearest node;
-* **+** / **-** zoom the *view* in / out and the **left/right arrows**
-  pan it; the **up/down arrows** zoom the flux axis about the continuum
-  level and **0** resets the view.  Looking around never changes which
-  stretch a fit governs, so the continuum on screen stays put: the view
-  becomes the window's range only when you refit (**f**).  Zoom out
+* **+** / **-** zoom the *view* in / out; the **left/right arrows** nudge
+  it sideways by a small step, with **shift+left/right** taking a
+  bigger stride; the **up/down arrows** zoom the flux axis and **0**
+  resets the view.  Looking around never changes which stretch a fit
+  governs, so the continuum on screen stays put: the view becomes the
+  window's range only when you refit (**f**).  Zoom out
   across a broad damped feature (Galactic Ly-alpha at 1215 A), place
   nodes on the shoulders and press **f**, and that single fit takes over
   the whole visible range;
@@ -68,7 +69,8 @@ HELP_TEXT = (
     "f: fit   s: spline (thru nodes)   c: Chebyshev (fits data, sigma-clips "
     "lines; nodes set ref level)   1-5: degree   d: drop overlapping fits   "
     "+/-: zoom in/out   "
-    "left/right: pan   up/down: y-zoom   0: reset view   "
+    "left/right: nudge (shift = bigger step)   up/down: y-zoom   "
+    "0: reset view   "
     "enter/a: accept & next   b: back   q: quit & save"
 )
 
@@ -205,7 +207,10 @@ class ContinuumGUI:
         # default-width window).  Kept small so a press nudges the view
         # rather than jumping it; hold the key to travel further.
         self.zoom_factor = 1.03125
-        self.pan_frac = 0.125  # pan step as a fraction of current width
+        # Arrows nudge the view; hold shift for a bigger step.  The fine
+        # step is for easing a window edge onto the right pixel.
+        self.pan_frac = 0.0125
+        self.pan_frac_coarse = 0.125
         self.min_window = max(5 * self.node_box,
                               0.05 * self.default_window)
 
@@ -538,6 +543,10 @@ class ContinuumGUI:
             self._zoom_y(-1)
         elif key == "d":
             self._drop_overlapping_fits()
+        elif key in ("shift+left", "shift_left"):
+            self._pan_window(-1, coarse=True)
+        elif key in ("shift+right", "shift_right"):
+            self._pan_window(+1, coarse=True)
         elif key == "left":
             self._pan_window(-1)
         elif key == "right":
@@ -628,13 +637,19 @@ class ContinuumGUI:
         self._draw(message=f"View {new_v1 - new_v0:.2f} wide "
                            "(f refits over this range)")
 
-    def _pan_window(self, direction: int):
-        """Shift the view left or right, keeping its width."""
+    def _pan_window(self, direction: int, coarse: bool = False):
+        """Shift the view left or right, keeping its width.
+
+        The plain arrows nudge by a small fraction of the width, for
+        easing an edge onto exactly the pixel you want; shift+arrow
+        takes the larger stride for covering ground.
+        """
         if self.default_window <= 0:
             return
         v0, v1 = self._view_range()
         width = v1 - v0
-        shift = direction * self.pan_frac * width
+        frac = self.pan_frac_coarse if coarse else self.pan_frac
+        shift = direction * frac * width
         new_v0, new_v1 = v0 + shift, v1 + shift
         if new_v0 < self.spec.wmin:
             new_v0, new_v1 = self.spec.wmin, self.spec.wmin + width
