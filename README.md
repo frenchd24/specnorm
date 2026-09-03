@@ -159,6 +159,11 @@ you deliberately zoomed for that window, so inheriting a wide view never
 silently widens later fits. A window wider than your chosen zoom is still
 shown whole, and `0` returns to automatic sizing.
 
+**What you can see is what you fit.** Whatever is on screen when you press
+`f` becomes the stretch that window governs, so zooming or panning always
+moves the fit region with it — including in a resumed session. Nodes are
+placed on what you can see, and the title reports the span the fit covers.
+
 The fit follows the view: it is re-evaluated from the fitted model whenever
 you zoom, pan, or move between windows, so a continuum you have fitted stays
 visible (and the title reports `no fit yet` / `fitted, not accepted` /
@@ -215,8 +220,10 @@ When you accept a window whose span you changed, the rest of the spectrum
 re-tiles at the default width from its right edge, preserving any downstream
 windows you had already fitted. Because zooming and panning can leave a
 stretch behind unfitted, a **coverage strip** under the plot shows the whole
-spectrum with accepted fits in green, masked regions in red, and a box
-around the current window; it reports how many unfitted regions remain, a
+spectrum with accepted fits in green (merged, so overlapping fits are one
+even shade rather than a darker patch), unfitted stretches in grey,
+fit-masked ranges in orange, exclusions in red, and a black box around the
+current view; it reports how many unfitted regions remain, a
 message warns you if accepting leaves a gap behind, and clicking the strip
 jumps straight to any window. The whole-spectrum mode (`-w 0`) has a single
 window and disables zooming and panning.

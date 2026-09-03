@@ -704,17 +704,15 @@ class ContinuumGUI:
     def _adopt_view(self, st: WindowState) -> bool:
         """Make the view the window's governing span before fitting.
 
+        What you can see is what you fit: whatever is on screen when you
+        press ``f`` becomes the stretch this window governs, so zooming
+        or panning always moves the fit with it.
+
         If the window already had an accepted fit over a different
         stretch, that fit is detached as a window of its own first, so
         re-fitting a sub-region does not silently drop coverage that was
         already agreed.  Returns True if the span changed.
         """
-        deliberate = (self._view_override is not None
-                      and self._view_idx == self.idx)
-        if not deliberate:
-            # The view width was inherited from the previous window, not
-            # chosen here: show more, but govern the same stretch.
-            return False
         v0, v1 = self._view_range()
         if abs(v0 - st.w0) < 1e-12 and abs(v1 - st.w1) < 1e-12:
             return False
@@ -1289,7 +1287,15 @@ class ContinuumGUI:
         ax.set_ylim(0, 1)
         ax.set_yticks([])
         ax.axhspan(0, 1, color="0.88", zorder=0)
+        # Merge before drawing: overlapping translucent patches used to
+        # stack into darker green, which looked like it meant something.
+        merged = []
         for (a, b) in self._covered_spans():
+            if merged and a <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], b)
+            else:
+                merged.append([a, b])
+        for (a, b) in merged:
             ax.axvspan(a, b, color="tab:green", alpha=0.55, lw=0, zorder=1)
         for (m0, m1) in self.spec.meta.get("fit_mask_regions", []):
             ax.axvspan(m0, m1, color="darkorange", alpha=0.35, lw=0, zorder=2)
@@ -1304,10 +1310,10 @@ class ContinuumGUI:
                        lw=1.0, ls=":", zorder=3)
         n_gap = len(self._coverage_gaps())
         ax.set_xlabel(
-            "coverage: green = accepted fit, orange = fit-masked, "
-            "red = excluded, box = current "
-            f"window   ({n_gap} unfitted region{'' if n_gap == 1 else 's'} "
-            "left; click to jump)", fontsize=8)
+            "coverage: green = fitted and accepted, grey = not fitted yet, "
+            "orange = fit-masked, red = excluded, black box = current view"
+            f"   ({n_gap} region{'' if n_gap == 1 else 's'} left to fit; "
+            "click anywhere to jump there)", fontsize=8)
         ax.tick_params(labelsize=7)
 
     # ------------------------------------------------------------------
