@@ -161,15 +161,23 @@ def plot_overview(result: NormalizedSpectrum, path: str,
                            alpha=0.13, zorder=0)
                 ax.axvline(max(w1 - share, w0), color="0.45", lw=0.7,
                            ls=":", zorder=2)
-        # y-limits from unmasked flux + finite continuum (mask-immune).
+        # Same rule as the interactive window, so a fit that looked fine
+        # while you were placing it looks the same here: scale to the
+        # flux, and pin the bottom at zero so line cores stay visible.
+        # A continuum that runs away at a window edge must not set the
+        # scale, but its typical level has to stay on screen, so the top
+        # is nudged up by a robust percentile rather than its maximum.
         ref = f[good]
-        finite_c = c[np.isfinite(c)]
-        if finite_c.size:
-            ref = np.concatenate([ref, finite_c])
+        if not ref.size:
+            ref = c[np.isfinite(c)]
         if ref.size:
             lo, hi = float(np.min(ref)), float(np.max(ref))
             pad = 0.08 * (hi - lo) if hi > lo else (abs(hi) * 0.1 or 1.0)
-            ax.set_ylim(lo - pad, hi + pad)
+            hi = hi + pad
+            finite_c = c[np.isfinite(c)]
+            if finite_c.size:
+                hi = max(hi, float(np.percentile(finite_c, 95)) * 1.02)
+            ax.set_ylim(min(0.0, lo - pad), hi)
         ax.set_xlim(w0, w1)
         ax.set_ylabel("Flux")
 

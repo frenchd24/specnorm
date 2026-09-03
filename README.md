@@ -356,7 +356,10 @@ stretch is tinted grey in both rows with a dotted boundary, so you can see
 how the right edge of one row joins the left edge of the next. The flux is
 shown at **the same binning you fitted with** (`-b`), so the overview has the
 signal-to-noise you were judging the fit against; the written output is
-unaffected. From Python, pass `bin=` to `plot_overview`. Tune the
+unaffected. Panels are scaled by the same rule as the interactive window —
+bottom pinned at zero, top set by the flux rather than by a continuum that
+runs away at a window edge — so a fit that looked right while you placed it
+looks the same here, and panels do not each pick their own baseline. From Python, pass `bin=` to `plot_overview`. Tune the
 panel width with `--overview-zoom`, the repeat with `--overview-overlap`, or
 skip the plot with `--no-overview`. From Python:
 `plot_overview(result, "overview.pdf", zoom=3.0, overlap=0.15)` — a `.png`
