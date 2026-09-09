@@ -710,10 +710,13 @@ class ContinuumGUI:
             accept_seq=st.accept_seq)
         st.accepted = False
         st.accept_seq = -1
+        mine = (self._view_override is not None and self._view_idx == self.idx)
         self.states.append(preserved)
         self.states.sort(key=lambda s: (s.w0, s.w1))
         self.idx = next(i for i, s in enumerate(self.states) if s is st)
-        self._view_idx = self.idx
+        # The re-sort moves this window; the override follows it only if
+        # it was this window's to begin with.
+        self._view_idx = self.idx if mine else -1
         return True
 
     def _adopt_view(self, st: WindowState) -> bool:
@@ -735,7 +738,10 @@ class ContinuumGUI:
         st.w0, st.w1 = v0, v1
         st.resized = True
         st.continuum = st.cont_err = st.rejected = None
-        self._view_idx = self.idx
+        # Pin the override to what was actually adopted.  Merely
+        # re-pointing the old override at this window revived a range
+        # left over from an earlier one, which snapped the view back.
+        self._set_view(v0, v1, sticky=False)
         return True
 
     def _jump_to(self, wavelength: float):
