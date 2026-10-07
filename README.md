@@ -7,7 +7,7 @@ ASCII spectra.
 The spectrum is presented one wavelength window at a time (default 20 A). You
 mask out contaminated regions (geocoronal Ly-alpha airglow, etc.), click where
 the continuum should be anchored, choose a model (cubic spline, polynomial up
-to degree 5, or Chebyshev series), inspect the fit, and accept it to move on.
+to degree 10, or Chebyshev series up to degree 10), inspect the fit, and accept it to move on.
 Accepted windows are blended smoothly across their overlaps, and the result is
 written out with `WAVELENGTH`, `FLUX`, `NORM_FLUX`, and `ERROR` columns. An
 intermediate masked spectrum is saved separately as you work.
@@ -83,7 +83,8 @@ Use `--ext N` to force a specific FITS extension.
 | `f` | fit and overplot the continuum |
 | `s` | switch to cubic spline (interpolates through your nodes) |
 | `c` | switch to sigma-clipped Chebyshev (fits the data, rejects lines) |
-| `1`–`5` | set the degree of the current model (switches spline to polynomial) |
+| `1`–`9` | set the degree of the current model (switches spline to polynomial) |
+| `[` / `]` | step the degree down / up, 1–10 (the way to reach degree 10) |
 | `+` / `-` | zoom the view in / out (geometric, ~3% per press, about the view centre) |
 | `←` / `→` | nudge the view left / right by ~1% of its width — for easing an edge onto the right pixel |
 | `shift`+`←` / `→` | pan by an eighth of the width (ten nudges' worth) for covering ground |
@@ -168,10 +169,13 @@ placed on what you can see, and the title reports the span the fit covers.
 The fit follows the view: it is re-evaluated from the fitted model whenever
 you zoom, pan, or move between windows, so a continuum you have fitted stays
 visible (and the title reports `no fit yet` / `fitted, not accepted` /
-`ACCEPTED` so you always know where a window stands). Changing a model to
-one that cannot be fitted with what is available — say pressing `5` with three
-nodes placed — reverts to the previous model rather than discarding your fit,
-and says which requirement was not met. Nodes narrow the range a Chebyshev fit
+`ACCEPTED` so you always know where a window stands). `s`, `c`, and the digit keys adopt the current view exactly as `f` does — so
+after zooming out to fit a broad feature, switching straight to Chebyshev
+(which needs no nodes) picks up the wider view rather than silently refitting
+the window's old span. Changing a model to one that cannot be fitted with
+what is available — say pressing `5` with three nodes placed — reverts the
+model, the fit, and the span together rather than discarding your fit or
+leaving it out of sync, and says which requirement was not met. Nodes narrow the range a Chebyshev fit
 uses, but only when they actually overlap the window: a window trimmed by
 knitting can end up beside its own nodes, and intersecting the two would leave
 nothing to fit at all.
@@ -257,9 +261,9 @@ coverage strip shows fit masks in orange and exclusions in red.
 The model menu per window offers two genuinely different philosophies:
 
 - **Node-based — "trust my clicks."** **Spline** passes exactly through your
-  nodes (best for wiggly continua); **polynomial (deg 1-5)** least-squares
+  nodes (best for wiggly continua); **polynomial (deg 1-10)** least-squares
   fits through them. A degree-*n* polynomial needs at least *n*+1 nodes.
-- **Data-based — "fit the pixels, reject the lines."** **Chebyshev (deg 1-5)**
+- **Data-based — "fit the pixels, reject the lines."** **Chebyshev (deg 1-10)**
   fits all unmasked pixels in the window directly, then iteratively
   sigma-clips outliers IRAF `continuum`-style: pixels more than `low_rej`
   sigma *below* the fit (absorption lines; default 1.5) or `high_rej` sigma

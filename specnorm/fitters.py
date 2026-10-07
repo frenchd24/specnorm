@@ -7,9 +7,9 @@ over an arbitrary wavelength grid.
 * SplineFitter      : cubic spline passing exactly through the nodes
                       (falls back to lower order for few nodes).
 * PolynomialFitter  : least-squares polynomial through the nodes,
-                      degree 1..5.
+                      degree 1..10.
 * ChebyshevFitter   : least-squares Chebyshev series through the nodes,
-                      degree 1..5 by default (numerically better behaved
+                      degree 1..10 by default (numerically better behaved
                       than raw polynomials over wide wavelength spans).
 """
 
@@ -21,7 +21,7 @@ import numpy as np
 from numpy.polynomial import chebyshev as _cheb
 from scipy.interpolate import CubicSpline, interp1d
 
-MAX_POLY_DEGREE = 5
+MAX_POLY_DEGREE = 10
 
 
 class BaseFitter:
@@ -124,7 +124,7 @@ class SplineFitter(BaseFitter):
 
 
 class PolynomialFitter(BaseFitter):
-    """Least-squares polynomial of degree 1-5."""
+    """Least-squares polynomial of degree 1-10."""
 
     name = "poly"
 
@@ -191,7 +191,7 @@ class ChebyshevFitter(BaseFitter):
     Parameters
     ----------
     degree : int
-        Chebyshev series degree, 1-5.
+        Chebyshev series degree, 1-10.
     low_rej, high_rej : float
         Rejection thresholds in units of the residual standard
         deviation, below/above the fit.  Set <= 0 to disable that side.

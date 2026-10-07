@@ -141,7 +141,7 @@ def main(argv=None) -> int:
                         choices=["spline", "poly", "cheb"],
                         help="Initial continuum model (default spline)")
     parser.add_argument("-d", "--degree", type=int, default=3,
-                        help="Initial polynomial/Chebyshev degree, 1-5 "
+                        help="Initial polynomial/Chebyshev degree, 1-10 "
                              "(default 3)")
     parser.add_argument("-b", "--bin", type=int, default=None, dest="nbin",
                         help="Bin the spectrum by N pixels for FITTING "

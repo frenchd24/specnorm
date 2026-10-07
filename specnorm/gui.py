@@ -37,7 +37,8 @@ nodes:
   already have accepted fits (green), which are masked (red), and where
   the current window sits; click it to jump to any window;
 * **f** (re)fits and overplots the continuum;
-* **s** / **c** / **1-5** switch model: spline, Chebyshev, or polynomial
+* **s** / **c** / **1-9** switch model: spline, Chebyshev, or polynomial
+  (**[** / **]** step the degree down/up, up to 10)
   of that degree;
 * **enter** (or **a**) accepts the fit and advances to the next window;
 * **b** goes back, **r** clears nodes, **u** undoes the last node,
@@ -60,14 +61,14 @@ from typing import List, Optional
 import numpy as np
 
 from .spectrum import Spectrum, NormalizedSpectrum
-from .fitters import BaseFitter, make_fitter
+from .fitters import BaseFitter, make_fitter, MAX_POLY_DEGREE
 
 HELP_TEXT = (
     "left/right click: add/delete node   m: fit-mask mode (hide from fit "
     "only)   x: exclude mode (also masked in output)   u: undo node   "
     "r: reset nodes\n"
     "f: fit   s: spline (thru nodes)   c: Chebyshev (fits data, sigma-clips "
-    "lines; nodes set ref level)   1-5: degree   d: drop overlapping fits   "
+    "lines; nodes set ref level)   1-9 or [ ]: degree (max 10)   d: drop overlapping fits   "
     "+/-: zoom in/out   "
     "left/right: nudge (shift = bigger step)   up/down: y-zoom   "
     "0: reset view   "
@@ -132,7 +133,7 @@ class ContinuumGUI:
     fitter : str
         Initial model: 'spline', 'poly', or 'cheb'.
     degree : int
-        Initial polynomial/Chebyshev degree (1-5).
+        Initial polynomial/Chebyshev degree (1-10).
     node_box : float
         Half-width (in wavelength units) of the median box used to set a
         node's flux when the user clicks.  Default: 0.5% of window width.
@@ -451,11 +452,22 @@ class ContinuumGUI:
             self._switch_model(st, "spline", st.degree)
         elif key == "c":
             self._switch_model(st, "cheb", st.degree)
-        elif key in "12345":
+        elif key in tuple("123456789"):
             # Digits set the degree of the current model; a spline has
-            # no degree, so it becomes a polynomial.
+            # no degree, so it becomes a polynomial.  (A tuple, not the
+            # string "123...", so an empty key can't match.)
             kind = "poly" if st.fitter_kind == "spline" else st.fitter_kind
             self._switch_model(st, kind, int(key))
+        elif key in ("[", "]"):
+            # Step the degree down/up, 1..MAX_POLY_DEGREE; the only way
+            # to reach 10, since 0 resets the view.
+            kind = "poly" if st.fitter_kind == "spline" else st.fitter_kind
+            base = st.degree if st.fitter_kind != "spline" else 0
+            new_deg = base + (1 if key == "]" else -1)
+            if 1 <= new_deg <= MAX_POLY_DEGREE:
+                self._switch_model(st, kind, new_deg)
+            else:
+                self._draw(message=f"Degree must be 1-{MAX_POLY_DEGREE}")
         elif key == "u":
             if st.nodes_x:
                 self._detach_accepted(st)
@@ -998,20 +1010,31 @@ class ContinuumGUI:
     def _switch_model(self, st: WindowState, kind: str, degree: int):
         """Change this window's model, reverting if the new one can't fit.
 
+        Adopts the current view first, exactly as pressing ``f`` does —
+        otherwise switching model directly (Chebyshev needs no nodes, so
+        this is a normal way to fit after zooming) would silently ignore
+        any zooming or panning and keep fitting the window's old span.
+
         Losing a good fit to a mistyped key would be unkind, so if the
         requested model cannot be fitted with the nodes available the
-        previous model and its fit are restored.
+        previous model, its fit, and the un-adopted span are restored.
         """
-        prev = (st.fitter_kind, st.degree, st.fitter, st.continuum,
-                st.cont_err, st.rejected, st.accepted)
+        prev = (st.w0, st.w1, st.resized, st.fitter_kind, st.degree,
+                st.fitter, st.continuum, st.cont_err, st.rejected,
+                st.accepted)
+        widened = self._adopt_view(st)
+        st = self.states[self.idx]
         st.fitter_kind, st.degree = kind, degree
         reason = self._fit_window(st)
-        if st.fitter is None and prev[2] is not None:
-            (st.fitter_kind, st.degree, st.fitter, st.continuum,
-             st.cont_err, st.rejected, st.accepted) = prev
-            self._draw(message=f"Kept {prev[2].label()} — "
+        if st.fitter is None and prev[5] is not None:
+            (st.w0, st.w1, st.resized, st.fitter_kind, st.degree,
+             st.fitter, st.continuum, st.cont_err, st.rejected,
+             st.accepted) = prev
+            self._draw(message=f"Kept {prev[5].label()} — "
                                + (reason or "the requested model would not fit"))
         else:
+            if reason is None and widened:
+                reason = f"Fit now covers {st.w0:.2f}-{st.w1:.2f}"
             self._draw(message=reason or "")
 
     def _fit_window(self, st: WindowState) -> Optional[str]:
