@@ -7,7 +7,7 @@ ASCII spectra.
 The spectrum is presented one wavelength window at a time (default 20 A). You
 mask out contaminated regions (geocoronal Ly-alpha airglow, etc.), click where
 the continuum should be anchored, choose a model (cubic spline, polynomial up
-to degree 5, or Chebyshev series), inspect the fit, and accept it to move on.
+to degree 10, or Chebyshev series up to degree 10), inspect the fit, and accept it to move on.
 Accepted windows are blended smoothly across their overlaps, and the result is
 written out with `WAVELENGTH`, `FLUX`, `NORM_FLUX`, and `ERROR` columns. An
 intermediate masked spectrum is saved separately as you work.
@@ -27,8 +27,8 @@ specnorm oc8c11020_x1d.fits --airglow -o oc8c11020_norm.fits
 ```
 
 `--airglow` pre-masks Ly-alpha (1213-1218.5), the OI triplet (1301-1307), and
-OI] 1355 before the GUI opens. Add custom regions with repeated
-`--mask W0:W1` flags. Data are binned x2 by default (`-b 1` to disable,
+OI] 1355 before the GUI opens. Add custom regions with repeated `--mask W0:W1` (fit-only) or
+`--exclude W0:W1` (also masked in the output) flags. Data are binned x2 by default (`-b 1` to disable,
 `-b N` for other factors).
 
 or from Python:
@@ -74,7 +74,8 @@ Use `--ext N` to force a specific FITS extension.
 
 | Action | Effect |
 |---|---|
-| `m` | toggle **mask mode**: two left-clicks bracket a region to mask (shaded red); right-click **undoes masks LIFO** (most recent first, cursor position irrelevant; a pending first edge is cancelled instead) |
+| `m` | toggle **fit-mask mode**: two left-clicks bracket a region to hide from the continuum fit (shaded orange); right-click **undoes LIFO** (most recent first; a pending first edge is cancelled instead) |
+| `x` | toggle **exclude mode**: same interaction (shaded red), but those pixels are also flagged as masked in the output |
 | left click | add a continuum node (flux = median of *unmasked* points in a small box around the click) |
 | right click | delete nearest node |
 | `u` | undo last node; with no nodes placed, step **back to the previous window and un-accept it** (rescues an accidental `enter`) |
@@ -82,10 +83,14 @@ Use `--ext N` to force a specific FITS extension.
 | `f` | fit and overplot the continuum |
 | `s` | switch to cubic spline (interpolates through your nodes) |
 | `c` | switch to sigma-clipped Chebyshev (fits the data, rejects lines) |
-| `1`–`5` | set the degree of the current model (switches spline to polynomial) |
-| `+` / `-` | zoom the current window out / in (geometric, x1.5 per press, about the window centre) |
-| `←` / `→` | pan the window left / right by a quarter of its width, keeping the width |
-| `0` | reset the current window to the default width |
+| `1`–`9` | set the degree of the current model (switches spline to polynomial) |
+| `[` / `]` | step the degree down / up, 1–10 (the way to reach degree 10) |
+| `+` / `-` | zoom the view in / out (geometric, ~3% per press, about the view centre) |
+| `←` / `→` | nudge the view left / right by ~1% of its width — for easing an edge onto the right pixel |
+| `shift`+`←` / `→` | pan by an eighth of the width (ten nudges' worth) for covering ground |
+| `↑` / `↓` | move the top of the flux axis down / up (~9% per press); the bottom stays at zero and the height is kept in every window |
+| `d` | drop other accepted fits overlapping this window, so a region can be redone from scratch |
+| `0` | restore automatic view sizing and the flux scaling |
 | click the coverage strip | jump to the window at that wavelength |
 | `enter` or `a` | accept this window's fit, advance to the next |
 | `b` | go back one window |
@@ -95,6 +100,21 @@ Matplotlib's zoom/pan toolbar works as usual; clicks are ignored while a
 toolbar tool is active (matplotlib's default key shortcuts are disabled so
 they don't collide with the bindings above). Each window remembers its own
 nodes and model, so you can go back and revise.
+
+**The plot always shows the final knitted continuum.** The blue curve is
+every accepted fit blended together, exactly as it will be written out — and
+it does not depend on the view. Zoom or pan however you like and the curve
+stays put, so you can judge which regions need redoing and spot joins that
+knitted badly without the display shifting under you.
+
+The fit you are working on is drawn separately, as a dashed purple line over
+its own span. Until you accept it, it contributes to the blue curve only
+where nothing accepted covers yet (filling a gap), never overriding the
+accepted result — and only across the range its nodes actually constrain, so
+a narrow fit seen from a zoomed-out window is not smeared across the view.
+The flux axis is likewise anchored to the data and the accepted continuum,
+so a half-finished fit cannot rescale the plot. Stretches with no fit yet
+appear as breaks in the blue curve, marked along the bottom axis.
 
 **Continuum error band.** Every fit shows a 1-sigma uncertainty band
 (dashed lines + faint fill): node-based models propagate the uncertainty of
@@ -108,45 +128,142 @@ constrained there (few nodes, or few unclipped pixels).
 
 **Adjustable window (broad features).** For a wide absorption feature such
 as the Galactic Ly-alpha damping trough at 1215 A — far wider than a normal
-20 A window — press `+` to zoom out until the window spans the whole
+20 A window — press `-` to zoom out until the window spans the whole
 feature, place continuum nodes on the clean shoulders either side, and fit a
 flat/linear continuum straight across (a degree-1 polynomial or a spline
 through the two shoulders). Because node placement and the applied continuum
 both operate on the current window, zooming out is what lets a single fit
-bridge the trough. `-` zooms back in, the arrow keys pan the window without
-changing its width, and `0` restores the default width. Zoom is geometric
+bridge the trough. `+` zooms back in, the left/right arrows pan the window
+without changing its width, the up/down arrows zoom the flux axis, and `0`
+restores the default view. Zoom is geometric
 (x1.5 per press) about the window centre, so repeated presses scale smoothly
 in both directions.
+
+**Both zooms stay where you put them.** The flux axis is anchored at zero
+(or below it, if the data go negative), so the cores of saturated absorption
+lines are never cut off; the up/down keys move the *top* of the axis, and the
+height you choose is then held in every window until you change it or press
+`0`. Anchoring at zero also makes autoscaling far steadier from window to
+window. If you want an arbitrary range instead — to inspect the continuum
+closely, say — set it with matplotlib's own zoom tool and it is honoured
+verbatim, bottom included, and survives redraws. `0` hands back autoscaling.
+
+Autoscaling itself is driven by the **flux**, never the continuum: including
+the fitted continuum let a high-order fit that runs away at a window edge drag
+the whole axis with it.
+
+**The view width stays where you put it too.** Once you zoom or pan, that width
+is carried over to the next window you visit, so accepting a fit no longer
+snaps the view sharply in when the next window happens to be narrow (a
+trimmed wing in a resumed session, say). A carried width only changes what
+you *see*: fitting adopts the view as the window's governing span only where
+you deliberately zoomed for that window, so inheriting a wide view never
+silently widens later fits. A window wider than your chosen zoom is still
+shown whole, and `0` returns to automatic sizing.
+
+**What you can see is what you fit.** Whatever is on screen when you press
+`f` becomes the stretch that window governs, so zooming or panning always
+moves the fit region with it — including in a resumed session. Nodes are
+placed on what you can see, and the title reports the span the fit covers.
 
 The fit follows the view: it is re-evaluated from the fitted model whenever
 you zoom, pan, or move between windows, so a continuum you have fitted stays
 visible (and the title reports `no fit yet` / `fitted, not accepted` /
-`ACCEPTED` so you always know where a window stands). Changing a model to
-one that cannot be fitted with the nodes available — say pressing `5` with
-three nodes placed — reverts to the previous model rather than discarding
-your fit.
+`ACCEPTED` so you always know where a window stands). `s`, `c`, and the digit keys adopt the current view exactly as `f` does — so
+after zooming out to fit a broad feature, switching straight to Chebyshev
+(which needs no nodes) picks up the wider view rather than silently refitting
+the window's old span. Changing a model to one that cannot be fitted with
+what is available — say pressing `5` with three nodes placed — reverts the
+model, the fit, and the span together rather than discarding your fit or
+leaving it out of sync, and says which requirement was not met. Nodes narrow the range a Chebyshev fit
+uses, but only when they actually overlap the window: a window trimmed by
+knitting can end up beside its own nodes, and intersecting the two would leave
+nothing to fit at all.
+
+**Knitting.** Accepting a window fits it in among the ones already there
+rather than competing with them. The window you just accepted takes
+precedence over anything it overlaps: older accepted fits are *trimmed back*
+to its edge — keeping a blend zone so the join stays smooth — an older fit
+that spanned right across it is split into the parts either side, and only
+windows it completely covers are retired. Going back to re-fit a region
+therefore never destroys the neighbouring work, and zooming into an
+already-accepted window preserves its surrounding coverage as separate
+wings.
+
+Where fits do overlap, they are combined as a **partition of unity**: each
+fit ramps in and out over the overlap with a smoothstep, reaching zero value
+*and* zero slope at its own edges and staying flat across its interior.
+Neighbouring ramps are complementary, so a join is a gradual crossover rather
+than a step — a 20% mismatch between adjacent fits crosses over smoothly
+across the whole overlap instead of jumping in a single pixel. Precedence
+(**recency**: a fit accepted later outranks an earlier one, so a re-fit
+supersedes what was there) is a constant per window and capped at one
+generation; deriving it per pixel, or letting the ratio grow without bound,
+would shove the crossover against a window edge and turn it back into a
+cliff. The third factor is **reliability**. The last one guards against a failure mode of
+high-order fits: a polynomial or Chebyshev series can run away at the edge
+of its window, and if that edge overlaps a neighbour it would otherwise drag
+the knitted continuum with it. A fit is therefore down-weighted where it
+extrapolates beyond its own nodes or fitted pixels, and where it strays much
+further from the local flux level than a competing fit does — so in an
+overlap the fit that stays closer to the data wins. In testing, a degree-5
+fit diverging to −142x the continuum level is suppressed to leave the
+knitted result within 0.03% of the true continuum.
+
+Two limits are worth knowing, because no weighting scheme can remove them:
+
+- **A crossover can only be as wide as the overlap.** If two adjacent fits
+  genuinely disagree, that difference has to be traversed somewhere. Raise
+  `--overlap` for gentler transitions.
+- **Where both fits extrapolate past their outermost nodes, the join is not
+  constrained by data at all** and its error roughly doubles. Since both
+  fits are penalised equally there, weighting cannot help — so the stretch
+  of the current window beyond its outermost nodes is shaded and labelled
+  *extrapolated (no node)* in the plot. Placing a node there is the cure.
 
 When you accept a window whose span you changed, the rest of the spectrum
 re-tiles at the default width from its right edge, preserving any downstream
 windows you had already fitted. Because zooming and panning can leave a
 stretch behind unfitted, a **coverage strip** under the plot shows the whole
-spectrum with accepted fits in green, masked regions in red, and a box
-around the current window; it reports how many unfitted regions remain, a
+spectrum with accepted fits in green (merged, so overlapping fits are one
+even shade rather than a darker patch), unfitted stretches in grey,
+fit-masked ranges in orange, exclusions in red, and a black box around the
+current view; it reports how many unfitted regions remain, a
 message warns you if accepting leaves a gap behind, and clicking the strip
 jumps straight to any window. The whole-spectrum mode (`-w 0`) has a single
 window and disables zooming and panning.
 
-**Masking and y-scaling.** The y-axis autoscales to the *unmasked* data only,
-so a masked airglow spike no longer flattens the rest of the window. Masking a
-region drops any nodes inside it and un-accepts affected windows so they get
-refit. All mask regions are recorded in the output headers.
+**Two kinds of mask.** Both hide pixels from the continuum fit, from node
+placement and from the y-axis autoscale (so a masked airglow spike no longer
+flattens the window), but they differ in what reaches the output:
+
+- **Fit masks** (`m`, `--mask W0:W1`) shape the fit only. Use them for *real
+  spectral features* — absorption lines, damped troughs — that you do not
+  want dragging the continuum down. The data are written out unflagged
+  (`MASK = 1`) and remain fully available for later analysis.
+- **Exclusions** (`x`, `--exclude W0:W1`) are for *genuinely bad data* —
+  geocoronal airglow, detector artefacts. These are ignored by the fit *and*
+  written with `MASK = 0` in every output file, so downstream tools skip
+  them. `--airglow` adds its regions as exclusions, since airglow-filled
+  pixels are contamination rather than signal.
+
+Overlapping or touching mask regions of the same kind are merged into one, so
+masking the same stretch twice leaves a single region and undoing it removes
+the whole thing. Masked data are drawn as they really are, with the line
+broken over the masked stretch rather than bridged across it. Every mask
+change is written to the session file immediately, so masking work cannot be
+lost.
+
+Masking a region drops any nodes inside it and un-accepts affected windows so
+they get refit. Both region lists are recorded in the output headers, and the
+coverage strip shows fit masks in orange and exclusions in red.
 
 The model menu per window offers two genuinely different philosophies:
 
 - **Node-based — "trust my clicks."** **Spline** passes exactly through your
-  nodes (best for wiggly continua); **polynomial (deg 1-5)** least-squares
+  nodes (best for wiggly continua); **polynomial (deg 1-10)** least-squares
   fits through them. A degree-*n* polynomial needs at least *n*+1 nodes.
-- **Data-based — "fit the pixels, reject the lines."** **Chebyshev (deg 1-5)**
+- **Data-based — "fit the pixels, reject the lines."** **Chebyshev (deg 1-10)**
   fits all unmasked pixels in the window directly, then iteratively
   sigma-clips outliers IRAF `continuum`-style: pixels more than `low_rej`
   sigma *below* the fit (absorption lines; default 1.5) or `high_rej` sigma
@@ -176,7 +293,7 @@ The model menu per window offers two genuinely different philosophies:
 
 `--window` sets the width of each fitting window in wavelength units (default
 20 Å, suited to medium/high-resolution STIS/COS data; use `0` to fit the whole
-spectrum at once). Consecutive windows overlap by `--overlap` (default 10%), and accepted
+spectrum at once). Consecutive windows overlap by `--overlap` (default 15%), and accepted
 continua are combined with linear ramp weights across the overlaps, so there
 are no jumps at window boundaries.
 
@@ -238,10 +355,76 @@ By default the CLI saves an overview figure next to the output
 (`<output>_overview.pdf`) showing the data and the fitted continuum
 together, with masked regions shaded. The spectrum is split into panels of
 **3x the fitting-window width** (so `-w 20` gives 60 A panels), up to four
-panels per PDF page. Tune the panel width with `--overview-zoom` (a
-multiplier of the window width) or skip the plot with `--no-overview`.
-From Python: `plot_overview(result, "overview.pdf", zoom=3.0)` — a `.png`
+panels per PDF page. Consecutive panels **overlap by 15%** and the shared
+stretch is tinted grey in both rows with a dotted boundary, so you can see
+how the right edge of one row joins the left edge of the next. The flux is
+shown at **the same binning you fitted with** (`-b`), so the overview has the
+signal-to-noise you were judging the fit against; the written output is
+unaffected. Panels are scaled by the same rule as the interactive window —
+bottom pinned at zero, top set by the flux rather than by a continuum that
+runs away at a window edge — so a fit that looked right while you placed it
+looks the same here, and panels do not each pick their own baseline. From Python, pass `bin=` to `plot_overview`. Tune the
+panel width with `--overview-zoom`, the repeat with `--overview-overlap`, or
+skip the plot with `--no-overview`. From Python:
+`plot_overview(result, "overview.pdf", zoom=3.0, overlap=0.15)` — a `.png`
 path gives a single tall figure instead of a paged PDF.
+
+### Dead pixels and finishing
+
+Detector edges are usually padded with zero flux and zero error. Those
+pixels cannot anchor a node (a node dropped there would drag the fit to
+zero), they are never reported as unfitted gaps, and the continuum across
+them is filled by holding the nearest fitted value — so a spectrum never
+ends with a stray "missing window" you cannot fit.
+
+Accepting the last window no longer ends the session while fittable regions
+remain: you are sent back to the first one still outstanding, with a count of
+what is left. Press **`q`** whenever you want to stop and write out what you
+have.
+
+### Saving and resuming a session
+
+Every acceptance writes `<output>_session.json` (change it with `--session`,
+or `--session none` to skip) recording the input file, binning, all settings,
+both mask lists, and every window with its nodes, model and acceptance state.
+To carry on later, or to go back and edit a region after you have already
+written the output:
+
+```bash
+specnorm --resume myspectrum_norm_session.json
+```
+
+The session also records how the outputs were written — path, style, `--plain`
+and so on — so resuming rewrites the same files instead of falling back to a
+default FITS name (which silently ignored `--plain`). Flags given on the resume
+command line still win.
+
+The spectrum is reopened, the masks reapplied and every window refit from its
+saved nodes, reproducing the previous continuum exactly, and the GUI opens on
+the first region still needing work. From Python, `load_session(path)` returns
+the rebuilt `(gui, native_spectrum)` pair.
+
+Binning is part of the session: resuming re-applies the `-b` factor the
+session was created with, refits on that grid, and still writes the output at
+native resolution. Pass `-b N` on the resume command line to *change* the
+binning — the spectrum is re-binned, every window refit on the new grid, and
+the new factor saved back. Resume reports what it is using, e.g.
+`Read 2000 points [1200.0-1260.0], binned x4 for fitting`.
+
+**A resumed session never closes itself** — you are editing, so it stays open
+however many regions you redo, until you press `q`. (A fresh run still closes
+once the whole spectrum has been covered for the first time; set
+`gui.finish_when_complete = False` to keep it open.) The session file is
+rewritten on every acceptance and whenever the window closes, so nothing is
+lost either way.
+
+**Redoing a region.** Coming back to a window and editing its nodes un-accepts
+it until you refit, so the coverage strip never shows a fit that no longer
+exists. If you zoom in and refit a sub-region, the previous fit is kept as
+wings either side rather than deleted — a message tells you where they are.
+When you would rather start clean, press **`d`** to drop every accepted fit
+overlapping the current window; whatever coverage that removes is reported as
+a gap so you can refit it deliberately.
 
 ### Intermediate masked file
 

@@ -7,9 +7,9 @@ over an arbitrary wavelength grid.
 * SplineFitter      : cubic spline passing exactly through the nodes
                       (falls back to lower order for few nodes).
 * PolynomialFitter  : least-squares polynomial through the nodes,
-                      degree 1..5.
+                      degree 1..10.
 * ChebyshevFitter   : least-squares Chebyshev series through the nodes,
-                      degree 1..5 by default (numerically better behaved
+                      degree 1..10 by default (numerically better behaved
                       than raw polynomials over wide wavelength spans).
 """
 
@@ -21,7 +21,7 @@ import numpy as np
 from numpy.polynomial import chebyshev as _cheb
 from scipy.interpolate import CubicSpline, interp1d
 
-MAX_POLY_DEGREE = 5
+MAX_POLY_DEGREE = 10
 
 
 class BaseFitter:
@@ -75,6 +75,18 @@ class BaseFitter:
         """1-sigma uncertainty of the continuum, or None if unavailable."""
         return None
 
+    @property
+    def support(self):
+        """(min, max) wavelength over which the fit is constrained.
+
+        Beyond this range the model is extrapolating, which is where
+        high-order fits characteristically run away.  Returns None if
+        unknown.
+        """
+        if self.nodes_x is None or self.nodes_x.size == 0:
+            return None
+        return (float(self.nodes_x.min()), float(self.nodes_x.max()))
+
     def _fit_impl(self, x, y):  # pragma: no cover - abstract
         raise NotImplementedError
 
@@ -112,7 +124,7 @@ class SplineFitter(BaseFitter):
 
 
 class PolynomialFitter(BaseFitter):
-    """Least-squares polynomial of degree 1-5."""
+    """Least-squares polynomial of degree 1-10."""
 
     name = "poly"
 
@@ -129,6 +141,11 @@ class PolynomialFitter(BaseFitter):
         xs = (x - x0) / sx
         self._cov = None
         try:
+            # An exact fit (n nodes, degree n-1) is legitimately
+            # "poorly conditioned" as far as polyfit is concerned; the
+            # user placed exactly enough nodes on purpose.
+            import warnings
+            warnings.filterwarnings("ignore", message=".*poorly conditioned.*")
             if self.nodes_err is not None:
                 coeffs, cov = np.polyfit(xs, y, self.degree,
                                          w=1.0 / self.nodes_err,
@@ -174,7 +191,7 @@ class ChebyshevFitter(BaseFitter):
     Parameters
     ----------
     degree : int
-        Chebyshev series degree, 1-5.
+        Chebyshev series degree, 1-10.
     low_rej, high_rej : float
         Rejection thresholds in units of the residual standard
         deviation, below/above the fit.  Set <= 0 to disable that side.
@@ -336,6 +353,13 @@ class ChebyshevFitter(BaseFitter):
         except np.linalg.LinAlgError:
             pass
         return self
+
+    @property
+    def support(self):
+        dom = getattr(self, "_domain", None)
+        if dom is not None:
+            return (float(dom[0]), float(dom[1]))
+        return super().support
 
     def uncertainty(self, wave):
         if self._cov is None:
