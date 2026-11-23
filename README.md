@@ -426,10 +426,10 @@ binning — the spectrum is re-binned, every window refit on the new grid, and
 the new factor saved back. Resume reports what it is using, e.g.
 `Read 2000 points [1200.0-1260.0], binned x4 for fitting`.
 
-`--write-binned` is remembered the same way: a session first written on the
-binned grid keeps writing on it when resumed, and `--no-write-binned` switches
-it back to native resolution. Either way the overview plot shows the data at
-the binning you fitted with, and its legend says so.
+`--write-binned` is the exception: it is never saved, so a resumed session
+writes native resolution unless you give `--write-binned` again. Either way
+the overview plot shows the data at the binning you fitted with, and its
+legend says so.
 
 **A resumed session never closes itself** — you are editing, so it stays open
 however many regions you redo, until you press `q`. (A fresh run still closes

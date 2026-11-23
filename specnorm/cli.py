@@ -80,12 +80,9 @@ def _run_resumed(args) -> int:
           + (f", binned x{nbin} for fitting"
              f"{' (changed by -b)' if args.nbin is not None else ''}"
              if nbin > 1 else ", unbinned"))
-    # --write-binned is part of how the session was written: keep it unless
-    # the command line says otherwise (--write-binned / --no-write-binned),
-    # and record the choice so the next resume does the same.
-    if args.write_binned is None:
-        args.write_binned = bool(gui.output_options.get("write_binned", False))
-    gui.output_options["write_binned"] = bool(args.write_binned)
+    # --write-binned is deliberately NOT remembered: output is on the native
+    # grid unless the flag is given on this command line.
+    gui.output_options.pop("write_binned", None)
     if native is not None and not args.write_binned:
         print(f"Output will be written on the native grid ({len(native)} px)")
     elif nbin > 1:
@@ -165,13 +162,13 @@ def main(argv=None) -> int:
                              "unless --write-binned is given. With --resume, "
                              "give it to change the binning of a saved "
                              "session; omit it to keep what was saved.")
-    parser.add_argument("--write-binned", action=argparse.BooleanOptionalAction,
-                        default=None,
+    parser.add_argument("--write-binned", action="store_true",
                         help="Write the binned spectrum instead of "
                              "evaluating the continuum on the native-"
-                             "resolution pixels. A resumed session keeps "
-                             "the choice it was saved with; use "
-                             "--no-write-binned to switch back to native.")
+                             "resolution pixels. Applies to this run only: "
+                             "it is not saved in the session, so a resumed "
+                             "session writes native resolution unless you "
+                             "give it again.")
     parser.add_argument("--mask", type=_parse_region, action="append",
                         default=[], metavar="W0:W1",
                         help="Hide a wavelength region from the continuum "
@@ -304,8 +301,7 @@ def main(argv=None) -> int:
                                  os.path.splitext(args.input)[0] + "_norm.fits"))
                         else None,
                         "style": args.style, "plain": bool(args.plain),
-                        "full": bool(args.full), "minimal": bool(args.minimal),
-                        "write_binned": bool(args.write_binned)},
+                        "full": bool(args.full), "minimal": bool(args.minimal)},
     )
     if session_out:
         print(f"Session saved: {session_out}")
