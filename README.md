@@ -467,7 +467,11 @@ spectrum (better S/N for placing the continuum), but the output is written
 at **native resolution**: the fitted models are re-evaluated exactly on the
 original pixels (no interpolation of binned arrays), blended with the same
 weights, with masks re-applied and the error band recomputed per pixel.
-Pass `--write-binned` to write the binned spectrum instead, or from Python
+Pass `--write-binned` to write the binned spectrum instead; every file it
+writes then ends in `_bin<N>` so binned products are obvious, e.g. with
+`-b 3`: `spec_norm_bin3.fits`, `spec_norm_full_bin3.fits`,
+`spec_norm_overview_bin3.pdf` and `spec_masked_bin3.fits` (the session file
+keeps its usual name). From Python
 use `normalize_interactive(binned, ..., output_on=native)` /
 `gui.assemble_on(native)`. The metadata records both grids
 (`binning` = output, `fit_binning` = fitting).

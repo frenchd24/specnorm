@@ -22,6 +22,16 @@ def _parse_region(text: str):
     return (w0, w1)
 
 
+def _saved_bin(session_path: str) -> int:
+    """The binning factor recorded in a session file (1 if unreadable)."""
+    import json
+    try:
+        with open(session_path) as fh:
+            return int(json.load(fh).get("source", {}).get("bin", 1) or 1)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 1
+
+
 def out_root_for_session(args) -> str:
     """Base path for the session file (mirrors the output naming)."""
     if args.output:
@@ -29,18 +39,38 @@ def out_root_for_session(args) -> str:
     return os.path.splitext(args.input)[0] + "_norm.fits"
 
 
+def bin_tag(path: str, nbin: int) -> str:
+    """Append ``_bin<N>`` to a file name (before its extension).
+
+    Used for every file written with --write-binned, so binned products are
+    obvious at a glance.  A name that already ends in the tag is unchanged.
+    """
+    nbin = int(nbin or 1)
+    if not path or nbin <= 1:
+        return path
+    root, ext = os.path.splitext(path)
+    tag = f"_bin{nbin}"
+    return path if root.endswith(tag) else root + tag + ext
+
+
 def _write_outputs(args, result, out, window=None, display_bin=1,
-                   data_bin=1) -> int:
-    """Write outputs for a resumed session (fresh runs write inline)."""
+                   data_bin=1) -> str:
+    """Write the normalized file(s) and overview; return the main path.
+
+    ``data_bin`` > 1 means ``result`` is on a binned grid (--write-binned):
+    every file name then gets a ``_bin<N>`` suffix.
+    """
     style = args.style
     if args.minimal:
         style = "minimal"
-    write_spectrum(result, out, style=style, plain=args.plain)
+    root_o, ext_o = os.path.splitext(out)
+    main_out = bin_tag(out, data_bin)
+    write_spectrum(result, main_out, style=style, plain=args.plain)
     if args.full:
-        root_o, ext_o = os.path.splitext(out)
-        write_spectrum(result, root_o + "_full" + (ext_o or ".fits"),
-                       style="full", plain=args.plain)
-        print(f"Full-info output: {root_o}_full{ext_o or '.fits'}")
+        full_out = bin_tag(root_o + "_full" + (ext_o or ".fits"), data_bin)
+        write_spectrum(result, full_out, style="full", plain=args.plain)
+        print(f"Full-info output: {full_out}")
+    out = main_out
     if style == "voigt":
         print("VoigtFit-ready output: MASK 1 = include in fit, 0 = exclude.")
         print("In your VoigtFit parameter file, remember the 'norm' keyword:")
@@ -48,13 +78,13 @@ def _write_outputs(args, result, out, window=None, display_bin=1,
     if window is None:
         window = args.window
     if not args.no_overview:
-        ov_path = os.path.splitext(out)[0] + "_overview.pdf"
+        ov_path = bin_tag(root_o + "_overview.pdf", data_bin)
         plot_overview(result, ov_path, zoom=args.overview_zoom,
                       window=window if window and window > 0 else None,
                       overlap=args.overview_overlap, bin=display_bin,
                       data_bin=data_bin)
         print(f"Overview plot: {ov_path}")
-    return 0
+    return main_out
 
 
 def _run_resumed(args) -> int:
@@ -65,6 +95,9 @@ def _run_resumed(args) -> int:
     masked_out = args.masked_output
     if masked_out is not None and masked_out.lower() == "none":
         masked_out = None
+    if masked_out is not None and args.write_binned:
+        masked_out = bin_tag(masked_out, args.nbin if args.nbin is not None
+                             else _saved_bin(args.resume))
     try:
         gui, native = load_session(args.resume, bin_override=args.nbin,
                                    masked_path=masked_out)
@@ -120,9 +153,10 @@ def _run_resumed(args) -> int:
     # result is already on the binned grid (--write-binned) it must not be
     # binned a second time.
     already = nbin if (native is None or args.write_binned) else 1
-    _write_outputs(args, result, out, window=gui.default_window,
-                   display_bin=max(nbin // already, 1), data_bin=already)
-    print(f"Wrote {out}")
+    written = _write_outputs(args, result, out, window=gui.default_window,
+                             display_bin=max(nbin // already, 1),
+                             data_bin=already)
+    print(f"Wrote {written}")
     return 0
 
 
@@ -274,6 +308,8 @@ def main(argv=None) -> int:
         masked_out = root + "_masked.fits"
     elif masked_out.lower() == "none":
         masked_out = None
+    if masked_out and args.write_binned:
+        masked_out = bin_tag(masked_out, args.nbin)
 
     session_out = args.session
     if session_out is None:
@@ -323,28 +359,12 @@ def main(argv=None) -> int:
     out = args.output
     if out is None:
         out = root + "_norm.fits"
-    style = args.style
-    if args.minimal:
-        style = "minimal"
-    write_spectrum(result, out, style=style, plain=args.plain)
-    if args.full:
-        root_o, ext_o = os.path.splitext(out)
-        full_out = root_o + "_full" + (ext_o or ".fits")
-        write_spectrum(result, full_out, style="full", plain=args.plain)
-        print(f"Full-info output: {full_out}")
-    if not args.no_overview:
-        ov_path = os.path.splitext(out)[0] + "_overview.pdf"
-        plot_overview(result, ov_path, zoom=args.overview_zoom,
-                      window=args.window if args.window > 0 else None,
-                      overlap=args.overview_overlap,
-                      bin=1 if args.write_binned else args.nbin,
-                      data_bin=args.nbin if args.write_binned else 1)
-        print(f"Overview plot: {ov_path}")
-    if style == "voigt":
-        print("VoigtFit-ready output: MASK 1 = include in fit, 0 = exclude.")
-        print("In your VoigtFit parameter file, remember the 'norm' keyword:")
-        print(f"  data  '{out}'  <resolution>  norm")
-    print(f"Wrote {out} ({n_acc} window(s) accepted)")
+    binned_out = args.nbin if (args.write_binned and args.nbin > 1) else 1
+    written = _write_outputs(args, result, out,
+                             window=args.window if args.window > 0 else None,
+                             display_bin=1 if binned_out > 1 else args.nbin,
+                             data_bin=binned_out)
+    print(f"Wrote {written} ({n_acc} window(s) accepted)")
     return 0
 
 
