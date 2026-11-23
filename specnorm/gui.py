@@ -181,6 +181,7 @@ class ContinuumGUI:
                  masked_path: Optional[str] = None,
                  session_path: Optional[str] = None,
                  output_options: Optional[dict] = None,
+                 native: Optional[Spectrum] = None,
                  low_rej: float = 1.5, high_rej: float = 3.5,
                  niterate: int = 20, grow: int = 6, min_pix: int = 3,
                  source: Optional[dict] = None):
@@ -189,6 +190,10 @@ class ContinuumGUI:
         self.spec = spectrum
         self.mask_dq = mask_dq
         self.masked_path = masked_path
+        # Unbinned spectrum (when fitting on binned data).  The masked
+        # intermediate file is always written on this grid, so it matches
+        # the native-resolution output whatever -b was used.
+        self.native = native
         self.session_path = session_path
         self.source = dict(source or {})
         # How the outputs were requested (path, style, plain, ...), so a
@@ -1878,12 +1883,30 @@ class ContinuumGUI:
         for s in stray:
             self._keep_loose(self._node_rows(s))
 
+    def _masked_spectrum(self) -> Spectrum:
+        """The spectrum to write as the masked file: native resolution
+        when available, with the current mask regions applied to it."""
+        if self.native is None:
+            return self.spec
+        n = self.native
+        out = Spectrum(n.wavelength.copy(), n.flux.copy(),
+                       error=None if n.error is None else n.error.copy(),
+                       dq=None if n.dq is None else n.dq.copy(),
+                       meta={k: v for k, v in n.meta.items()
+                             if k not in ("fit_mask_regions",
+                                          "exclude_regions", "binning")})
+        for key, kind in (("fit_mask_regions", "fit"),
+                          ("exclude_regions", "exclude")):
+            for (m0, m1) in self.spec.meta.get(key, []):
+                out.mask_region(m0, m1, kind=kind)
+        return out
+
     def _write_masked(self):
         if self.masked_path is None:
             return
         from .writer import write_masked
         try:
-            write_masked(self.spec, self.masked_path)
+            write_masked(self._masked_spectrum(), self.masked_path)
         except Exception as exc:  # don't let I/O kill the session
             print(f"Warning: could not write masked file: {exc}")
 
@@ -2178,6 +2201,7 @@ def load_session(path: str, bin_override: Optional[int] = None,
         mask_dq=bool(cfg.get("mask_dq", True)),
         session_path=path,
         masked_path=masked_path,
+        native=native,
         source=src,
         **cfg.get("clip", {}))
     gui.restore_session(state, recompute=rebinned)
@@ -2197,6 +2221,7 @@ def normalize_interactive(spectrum: Spectrum, window: float = 20.0,
     ``spectrum`` is binned for fitting), the accepted fits are
     evaluated on that spectrum's wavelength grid instead.
     """
+    kwargs.setdefault("native", output_on)
     gui = ContinuumGUI(spectrum, window=window, overlap=overlap,
                        fitter=fitter, degree=degree, **kwargs)
     result = gui.run()

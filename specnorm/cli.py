@@ -22,16 +22,6 @@ def _parse_region(text: str):
     return (w0, w1)
 
 
-def _saved_bin(session_path: str) -> int:
-    """The binning factor recorded in a session file (1 if unreadable)."""
-    import json
-    try:
-        with open(session_path) as fh:
-            return int(json.load(fh).get("source", {}).get("bin", 1) or 1)
-    except (OSError, ValueError, TypeError, AttributeError):
-        return 1
-
-
 def out_root_for_session(args) -> str:
     """Base path for the session file (mirrors the output naming)."""
     if args.output:
@@ -92,18 +82,22 @@ def _run_resumed(args) -> int:
     if not os.path.exists(args.resume):
         print(f"Session file not found: {args.resume}", file=sys.stderr)
         return 1
-    masked_out = args.masked_output
-    if masked_out is not None and masked_out.lower() == "none":
-        masked_out = None
-    if masked_out is not None and args.write_binned:
-        masked_out = bin_tag(masked_out, args.nbin if args.nbin is not None
-                             else _saved_bin(args.resume))
     try:
-        gui, native = load_session(args.resume, bin_override=args.nbin,
-                                   masked_path=masked_out)
+        gui, native = load_session(args.resume, bin_override=args.nbin)
     except (ValueError, KeyError, OSError) as exc:
         print(f"Could not read session {args.resume}: {exc}", file=sys.stderr)
         return 1
+    # The masked file is rewritten on resume so it always reflects the
+    # current masks: at the path given now, else the one the session was
+    # written with, else the default next to the input.
+    masked_out = args.masked_output
+    if masked_out is None:
+        masked_out = gui.output_options.get("masked_output")
+    if masked_out is None:
+        masked_out = os.path.splitext(gui.source.get("input", "spectrum"))[0] \
+            + "_masked.fits"
+    gui.output_options["masked_output"] = masked_out
+    gui.masked_path = None if masked_out.lower() == "none" else masked_out
     n_acc = sum(s.accepted for s in gui.states)
     nbin = int(gui.source.get("bin", 1) or 1)
     print(f"Resumed {args.resume}: {len(gui.states)} windows, "
@@ -156,6 +150,9 @@ def _run_resumed(args) -> int:
     written = _write_outputs(args, result, out, window=gui.default_window,
                              display_bin=max(nbin // already, 1),
                              data_bin=already)
+    if gui.masked_path:
+        print(f"Masked spectrum (native resolution, current masks): "
+              f"{gui.masked_path}")
     print(f"Wrote {written}")
     return 0
 
@@ -220,7 +217,9 @@ def main(argv=None) -> int:
     parser.add_argument("--masked-output", default=None, metavar="PATH",
                         help="Where to write the intermediate masked "
                              "spectrum (default: <input>_masked.fits; "
-                             "pass 'none' to skip)")
+                             "pass 'none' to skip). Always native "
+                             "resolution; rewritten on --resume so it "
+                             "matches the current masks.")
     parser.add_argument("--low-rej", type=float, default=1.5,
                         help="Chebyshev sigma-clip threshold below the fit "
                              "(absorption; default 1.5, <=0 disables)")
@@ -308,8 +307,6 @@ def main(argv=None) -> int:
         masked_out = root + "_masked.fits"
     elif masked_out.lower() == "none":
         masked_out = None
-    if masked_out and args.write_binned:
-        masked_out = bin_tag(masked_out, args.nbin)
 
     session_out = args.session
     if session_out is None:
@@ -330,6 +327,7 @@ def main(argv=None) -> int:
         output_on=(spec_native if args.nbin > 1 and not args.write_binned
                    else None),
         session_path=session_out,
+        native=spec_native if args.nbin > 1 else None,
         source={"input": os.path.abspath(args.input), "ext": ext,
                 "bin": args.nbin},
         output_options={"output": os.path.abspath(out) if
@@ -337,7 +335,9 @@ def main(argv=None) -> int:
                                  os.path.splitext(args.input)[0] + "_norm.fits"))
                         else None,
                         "style": args.style, "plain": bool(args.plain),
-                        "full": bool(args.full), "minimal": bool(args.minimal)},
+                        "full": bool(args.full), "minimal": bool(args.minimal),
+                        "masked_output": (os.path.abspath(masked_out)
+                                          if masked_out else "none")},
     )
     if session_out:
         print(f"Session saved: {session_out}")
