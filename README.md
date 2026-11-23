@@ -372,7 +372,7 @@ signal-to-noise you were judging the fit against; the written output is
 unaffected. Panels are scaled by the same rule as the interactive window —
 bottom pinned at zero, top set by the flux rather than by a continuum that
 runs away at a window edge — so a fit that looked right while you placed it
-looks the same here, and panels do not each pick their own baseline. From Python, pass `bin=` to `plot_overview`. Tune the
+looks the same here, and panels do not each pick their own baseline. From Python, pass `bin=` to `plot_overview` (and `data_bin=` if the result is already on a binned grid). Tune the
 panel width with `--overview-zoom`, the repeat with `--overview-overlap`, or
 skip the plot with `--no-overview`. From Python:
 `plot_overview(result, "overview.pdf", zoom=3.0, overlap=0.15)` — a `.png`
@@ -425,6 +425,11 @@ native resolution. Pass `-b N` on the resume command line to *change* the
 binning — the spectrum is re-binned, every window refit on the new grid, and
 the new factor saved back. Resume reports what it is using, e.g.
 `Read 2000 points [1200.0-1260.0], binned x4 for fitting`.
+
+`--write-binned` is remembered the same way: a session first written on the
+binned grid keeps writing on it when resumed, and `--no-write-binned` switches
+it back to native resolution. Either way the overview plot shows the data at
+the binning you fitted with, and its legend says so.
 
 **A resumed session never closes itself** — you are editing, so it stays open
 however many regions you redo, until you press `q`. (A fresh run still closes

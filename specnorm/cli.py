@@ -29,7 +29,8 @@ def out_root_for_session(args) -> str:
     return os.path.splitext(args.input)[0] + "_norm.fits"
 
 
-def _write_outputs(args, result, out, window=None, display_bin=1) -> int:
+def _write_outputs(args, result, out, window=None, display_bin=1,
+                   data_bin=1) -> int:
     """Write outputs for a resumed session (fresh runs write inline)."""
     style = args.style
     if args.minimal:
@@ -50,7 +51,8 @@ def _write_outputs(args, result, out, window=None, display_bin=1) -> int:
         ov_path = os.path.splitext(out)[0] + "_overview.pdf"
         plot_overview(result, ov_path, zoom=args.overview_zoom,
                       window=window if window and window > 0 else None,
-                      overlap=args.overview_overlap, bin=display_bin)
+                      overlap=args.overview_overlap, bin=display_bin,
+                      data_bin=data_bin)
         print(f"Overview plot: {ov_path}")
     return 0
 
@@ -78,8 +80,17 @@ def _run_resumed(args) -> int:
           + (f", binned x{nbin} for fitting"
              f"{' (changed by -b)' if args.nbin is not None else ''}"
              if nbin > 1 else ", unbinned"))
+    # --write-binned is part of how the session was written: keep it unless
+    # the command line says otherwise (--write-binned / --no-write-binned),
+    # and record the choice so the next resume does the same.
+    if args.write_binned is None:
+        args.write_binned = bool(gui.output_options.get("write_binned", False))
+    gui.output_options["write_binned"] = bool(args.write_binned)
     if native is not None and not args.write_binned:
         print(f"Output will be written on the native grid ({len(native)} px)")
+    elif nbin > 1:
+        print(f"Output will be written on the x{nbin}-binned grid "
+              f"({len(gui.spec)} px)")
     gaps = gui._coverage_gaps()
     print(f"{len(gaps)} region(s) still unfitted"
           if gaps else "All fittable regions are covered")
@@ -108,8 +119,12 @@ def _run_resumed(args) -> int:
         print("Note: --plain applies to text output; writing FITS to "
               f"{out}. Give -o with a text extension for plain output.",
               file=sys.stderr)
-    _write_outputs(args, result, out,
-                   window=gui.default_window, display_bin=nbin)
+    # The overview shows the data at the binning used for fitting.  When the
+    # result is already on the binned grid (--write-binned) it must not be
+    # binned a second time.
+    already = nbin if (native is None or args.write_binned) else 1
+    _write_outputs(args, result, out, window=gui.default_window,
+                   display_bin=max(nbin // already, 1), data_bin=already)
     print(f"Wrote {out}")
     return 0
 
@@ -150,10 +165,13 @@ def main(argv=None) -> int:
                              "unless --write-binned is given. With --resume, "
                              "give it to change the binning of a saved "
                              "session; omit it to keep what was saved.")
-    parser.add_argument("--write-binned", action="store_true",
+    parser.add_argument("--write-binned", action=argparse.BooleanOptionalAction,
+                        default=None,
                         help="Write the binned spectrum instead of "
                              "evaluating the continuum on the native-"
-                             "resolution pixels")
+                             "resolution pixels. A resumed session keeps "
+                             "the choice it was saved with; use "
+                             "--no-write-binned to switch back to native.")
     parser.add_argument("--mask", type=_parse_region, action="append",
                         default=[], metavar="W0:W1",
                         help="Hide a wavelength region from the continuum "
@@ -323,7 +341,8 @@ def main(argv=None) -> int:
         plot_overview(result, ov_path, zoom=args.overview_zoom,
                       window=args.window if args.window > 0 else None,
                       overlap=args.overview_overlap,
-                      bin=1 if args.write_binned else args.nbin)
+                      bin=1 if args.write_binned else args.nbin,
+                      data_bin=args.nbin if args.write_binned else 1)
         print(f"Overview plot: {ov_path}")
     if style == "voigt":
         print("VoigtFit-ready output: MASK 1 = include in fit, 0 = exclude.")
