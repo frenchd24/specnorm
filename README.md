@@ -76,10 +76,10 @@ Use `--ext N` to force a specific FITS extension.
 |---|---|
 | `m` | toggle **fit-mask mode**: two left-clicks bracket a region to hide from the continuum fit (shaded orange); right-click **undoes LIFO** (most recent first; a pending first edge is cancelled instead) |
 | `x` | toggle **exclude mode**: same interaction (shaded red), but those pixels are also flagged as masked in the output |
-| left click | add a continuum node (flux = median of *unmasked* points in a small box around the click) |
-| right click | delete nearest node |
-| `u` | undo last node; with no nodes placed, step **back to the previous window and un-accept it** (rescues an accidental `enter`) |
-| `r` | reset all nodes in this window |
+| left click | add a continuum node (flux = median of *unmasked* points in a small box around the click); a click right beside an existing node re-places that node |
+| right click | delete the nearest node shown, whichever fit it came from |
+| `u` | undo the last node you placed; with none placed, **un-accept the fit you accepted last** in this sitting (rescues an accidental `enter`) |
+| `r` | clear every node in view |
 | `f` | fit and overplot the continuum |
 | `s` | switch to cubic spline (interpolates through your nodes) |
 | `c` | switch to sigma-clipped Chebyshev (fits the data, rejects lines) |
@@ -92,14 +92,24 @@ Use `--ext N` to force a specific FITS extension.
 | `d` | drop other accepted fits overlapping this window, so a region can be redone from scratch |
 | `0` | restore automatic view sizing and the flux scaling |
 | click the coverage strip | jump to the window at that wavelength |
-| `enter` or `a` | accept this window's fit, advance to the next |
+| `enter` or `a` | accept this window's fit, advance to the next; on a fit that is already accepted it only moves on |
 | `b` | go back one window |
 | `q` | stop early and write whatever was accepted |
 
 Matplotlib's zoom/pan toolbar works as usual; clicks are ignored while a
 toolbar tool is active (matplotlib's default key shortcuts are disabled so
-they don't collide with the bindings above). Each window remembers its own
-nodes and model, so you can go back and revise.
+they don't collide with the bindings above).
+
+**Every node behind the continuum is always on screen.** Whatever the view —
+any zoom, any window, a fresh run or a resumed session — the red dots are all
+the nodes that shape the continuum you are looking at, from every fit that
+reaches into the view. (Where a newer fit has replaced part of an older one,
+the older fit's nodes in that stretch are retired with it, so you never see
+nodes that no longer do anything.) Pressing `f` fits through exactly the nodes
+you can see, so neighbouring fits share the nodes in their overlap and join
+cleanly. Delete a node and it stays deleted. Hollow dots are nodes that were
+placed but are not part of any fit yet — for example from an edit you started
+and did not accept — ready to be used by the next fit there.
 
 **The plot always shows the final knitted continuum.** The blue curve is
 every accepted fit blended together, exactly as it will be written out — and
@@ -175,10 +185,9 @@ after zooming out to fit a broad feature, switching straight to Chebyshev
 the window's old span. Changing a model to one that cannot be fitted with
 what is available — say pressing `5` with three nodes placed — reverts the
 model, the fit, and the span together rather than discarding your fit or
-leaving it out of sync, and says which requirement was not met. Nodes narrow the range a Chebyshev fit
-uses, but only when they actually overlap the window: a window trimmed by
-knitting can end up beside its own nodes, and intersecting the two would leave
-nothing to fit at all.
+leaving it out of sync, and says which requirement was not met. A Chebyshev
+fit always uses all the unmasked data in view; nodes only set the reference
+level for its line rejection and never narrow the range it fits.
 
 **Knitting.** Accepting a window fits it in among the ones already there
 rather than competing with them. The window you just accepted takes
@@ -286,8 +295,8 @@ The model menu per window offers two genuinely different philosophies:
   between them) for a robust MAD-based first rejection pass, which removes
   the lines before the first Chebyshev fit. So for line-dense windows, click
   a few nodes on clean continuum patches first, then press `f`. With zero
-  nodes the whole window is blind-fit (fine for sparse lines); with two or
-  more nodes the fitted range is also restricted to [first node, last node].
+  nodes the whole window is blind-fit (fine for sparse lines). Either way the
+  fit covers the whole visible window — to fit less, zoom in.
 
 ## Windowing and blending
 
@@ -363,7 +372,7 @@ signal-to-noise you were judging the fit against; the written output is
 unaffected. Panels are scaled by the same rule as the interactive window —
 bottom pinned at zero, top set by the flux rather than by a continuum that
 runs away at a window edge — so a fit that looked right while you placed it
-looks the same here, and panels do not each pick their own baseline. From Python, pass `bin=` to `plot_overview`. Tune the
+looks the same here, and panels do not each pick their own baseline. From Python, pass `bin=` to `plot_overview` (and `data_bin=` if the result is already on a binned grid). Tune the
 panel width with `--overview-zoom`, the repeat with `--overview-overlap`, or
 skip the plot with `--no-overview`. From Python:
 `plot_overview(result, "overview.pdf", zoom=3.0, overlap=0.15)` — a `.png`
@@ -386,7 +395,8 @@ have.
 
 Every acceptance writes `<output>_session.json` (change it with `--session`,
 or `--session none` to skip) recording the input file, binning, all settings,
-both mask lists, and every window with its nodes, model and acceptance state.
+both mask lists, and every window with its nodes, model, acceptance state,
+the range it was fitted over and (for Chebyshev fits) the fitted model itself.
 To carry on later, or to go back and edit a region after you have already
 written the output:
 
@@ -399,9 +409,14 @@ and so on — so resuming rewrites the same files instead of falling back to a
 default FITS name (which silently ignored `--plain`). Flags given on the resume
 command line still win.
 
-The spectrum is reopened, the masks reapplied and every window refit from its
-saved nodes, reproducing the previous continuum exactly, and the GUI opens on
-the first region still needing work. From Python, `load_session(path)` returns
+The spectrum is reopened, the masks reapplied and every accepted fit restored
+exactly as it was saved — the continuum you see on resuming is the one in the
+overview plot and the output file — and the GUI opens on the first region
+still needing work. Only accepted fits come back as fits: an edit you started
+but never accepted is not restored as a fit (its nodes are, shown hollow), and
+stepping through accepted windows with `enter` changes nothing. Session files
+from before 0.25 still load; their Chebyshev fits are refitted, since those
+files do not hold the fitted model. From Python, `load_session(path)` returns
 the rebuilt `(gui, native_spectrum)` pair.
 
 Binning is part of the session: resuming re-applies the `-b` factor the
@@ -411,6 +426,11 @@ binning — the spectrum is re-binned, every window refit on the new grid, and
 the new factor saved back. Resume reports what it is using, e.g.
 `Read 2000 points [1200.0-1260.0], binned x4 for fitting`.
 
+`--write-binned` is the exception: it is never saved, so a resumed session
+writes native resolution unless you give `--write-binned` again. Either way
+the overview plot shows the data at the binning you fitted with, and its
+legend says so.
+
 **A resumed session never closes itself** — you are editing, so it stays open
 however many regions you redo, until you press `q`. (A fresh run still closes
 once the whole spectrum has been covered for the first time; set
@@ -418,9 +438,9 @@ once the whole spectrum has been covered for the first time; set
 rewritten on every acceptance and whenever the window closes, so nothing is
 lost either way.
 
-**Redoing a region.** Coming back to a window and editing its nodes un-accepts
-it until you refit, so the coverage strip never shows a fit that no longer
-exists. If you zoom in and refit a sub-region, the previous fit is kept as
+**Redoing a region.** Coming back to an accepted region and editing nodes or
+pressing `f` starts a replacement; the accepted fit stays in force (and in the
+blue curve) until you accept the new one with `enter`. If you zoom in and refit a sub-region, the previous fit is kept as
 wings either side rather than deleted — a message tells you where they are.
 When you would rather start clean, press **`d`** to drop every accepted fit
 overlapping the current window; whatever coverage that removes is reported as
@@ -430,10 +450,16 @@ a gap so you can refit it deliberately.
 
 The CLI also writes `<input>_masked.fits` (override with `--masked-output`,
 or `--masked-output none` to skip) with columns `WAVELENGTH`, `FLUX`,
-`ERROR`, `MASK` (1 = masked) and the mask regions in the header. It is
-updated each time you accept a window, so the masking work is preserved even
-if you quit before finishing the fits. `specnorm.write_masked(spec, path)`
-does the same from Python.
+`ERROR`, `MASK` (0 = excluded, 1 = good; fit-only masks stay 1) and the mask
+regions in the header. It is always at **native resolution**, whatever `-b`
+you fit with, so it lines up pixel for pixel with the normalized output.
+
+It is a record for you to inspect; specnorm never reads it back (the masks
+live in the session file as wavelength ranges). It is updated each time you
+accept a window and when the GUI closes, and a resumed session rewrites it —
+at the same path, or wherever `--masked-output` points — so it always shows
+the current masks, even after you change the masks or the binning.
+`specnorm.write_masked(spec, path)` does the same from Python.
 
 ### Binning
 
@@ -447,7 +473,11 @@ spectrum (better S/N for placing the continuum), but the output is written
 at **native resolution**: the fitted models are re-evaluated exactly on the
 original pixels (no interpolation of binned arrays), blended with the same
 weights, with masks re-applied and the error band recomputed per pixel.
-Pass `--write-binned` to write the binned spectrum instead, or from Python
+Pass `--write-binned` to write the binned spectrum instead; every file it
+writes then ends in `_bin<N>` so binned products are obvious, e.g. with
+`-b 3`: `spec_norm_bin3.fits`, `spec_norm_full_bin3.fits`,
+`spec_norm_overview_bin3.pdf` (the session file and the masked spectrum keep
+their usual names). From Python
 use `normalize_interactive(binned, ..., output_on=native)` /
 `gui.assemble_on(native)`. The metadata records both grids
 (`binning` = output, `fit_binning` = fitting).

@@ -29,17 +29,38 @@ def out_root_for_session(args) -> str:
     return os.path.splitext(args.input)[0] + "_norm.fits"
 
 
-def _write_outputs(args, result, out, window=None, display_bin=1) -> int:
-    """Write outputs for a resumed session (fresh runs write inline)."""
+def bin_tag(path: str, nbin: int) -> str:
+    """Append ``_bin<N>`` to a file name (before its extension).
+
+    Used for every file written with --write-binned, so binned products are
+    obvious at a glance.  A name that already ends in the tag is unchanged.
+    """
+    nbin = int(nbin or 1)
+    if not path or nbin <= 1:
+        return path
+    root, ext = os.path.splitext(path)
+    tag = f"_bin{nbin}"
+    return path if root.endswith(tag) else root + tag + ext
+
+
+def _write_outputs(args, result, out, window=None, display_bin=1,
+                   data_bin=1) -> str:
+    """Write the normalized file(s) and overview; return the main path.
+
+    ``data_bin`` > 1 means ``result`` is on a binned grid (--write-binned):
+    every file name then gets a ``_bin<N>`` suffix.
+    """
     style = args.style
     if args.minimal:
         style = "minimal"
-    write_spectrum(result, out, style=style, plain=args.plain)
+    root_o, ext_o = os.path.splitext(out)
+    main_out = bin_tag(out, data_bin)
+    write_spectrum(result, main_out, style=style, plain=args.plain)
     if args.full:
-        root_o, ext_o = os.path.splitext(out)
-        write_spectrum(result, root_o + "_full" + (ext_o or ".fits"),
-                       style="full", plain=args.plain)
-        print(f"Full-info output: {root_o}_full{ext_o or '.fits'}")
+        full_out = bin_tag(root_o + "_full" + (ext_o or ".fits"), data_bin)
+        write_spectrum(result, full_out, style="full", plain=args.plain)
+        print(f"Full-info output: {full_out}")
+    out = main_out
     if style == "voigt":
         print("VoigtFit-ready output: MASK 1 = include in fit, 0 = exclude.")
         print("In your VoigtFit parameter file, remember the 'norm' keyword:")
@@ -47,12 +68,13 @@ def _write_outputs(args, result, out, window=None, display_bin=1) -> int:
     if window is None:
         window = args.window
     if not args.no_overview:
-        ov_path = os.path.splitext(out)[0] + "_overview.pdf"
+        ov_path = bin_tag(root_o + "_overview.pdf", data_bin)
         plot_overview(result, ov_path, zoom=args.overview_zoom,
                       window=window if window and window > 0 else None,
-                      overlap=args.overview_overlap, bin=display_bin)
+                      overlap=args.overview_overlap, bin=display_bin,
+                      data_bin=data_bin)
         print(f"Overview plot: {ov_path}")
-    return 0
+    return main_out
 
 
 def _run_resumed(args) -> int:
@@ -60,15 +82,22 @@ def _run_resumed(args) -> int:
     if not os.path.exists(args.resume):
         print(f"Session file not found: {args.resume}", file=sys.stderr)
         return 1
-    masked_out = args.masked_output
-    if masked_out is not None and masked_out.lower() == "none":
-        masked_out = None
     try:
-        gui, native = load_session(args.resume, bin_override=args.nbin,
-                                   masked_path=masked_out)
+        gui, native = load_session(args.resume, bin_override=args.nbin)
     except (ValueError, KeyError, OSError) as exc:
         print(f"Could not read session {args.resume}: {exc}", file=sys.stderr)
         return 1
+    # The masked file is rewritten on resume so it always reflects the
+    # current masks: at the path given now, else the one the session was
+    # written with, else the default next to the input.
+    masked_out = args.masked_output
+    if masked_out is None:
+        masked_out = gui.output_options.get("masked_output")
+    if masked_out is None:
+        masked_out = os.path.splitext(gui.source.get("input", "spectrum"))[0] \
+            + "_masked.fits"
+    gui.output_options["masked_output"] = masked_out
+    gui.masked_path = None if masked_out.lower() == "none" else masked_out
     n_acc = sum(s.accepted for s in gui.states)
     nbin = int(gui.source.get("bin", 1) or 1)
     print(f"Resumed {args.resume}: {len(gui.states)} windows, "
@@ -78,8 +107,14 @@ def _run_resumed(args) -> int:
           + (f", binned x{nbin} for fitting"
              f"{' (changed by -b)' if args.nbin is not None else ''}"
              if nbin > 1 else ", unbinned"))
+    # --write-binned is deliberately NOT remembered: output is on the native
+    # grid unless the flag is given on this command line.
+    gui.output_options.pop("write_binned", None)
     if native is not None and not args.write_binned:
         print(f"Output will be written on the native grid ({len(native)} px)")
+    elif nbin > 1:
+        print(f"Output will be written on the x{nbin}-binned grid "
+              f"({len(gui.spec)} px)")
     gaps = gui._coverage_gaps()
     print(f"{len(gaps)} region(s) still unfitted"
           if gaps else "All fittable regions are covered")
@@ -108,9 +143,17 @@ def _run_resumed(args) -> int:
         print("Note: --plain applies to text output; writing FITS to "
               f"{out}. Give -o with a text extension for plain output.",
               file=sys.stderr)
-    _write_outputs(args, result, out,
-                   window=gui.default_window, display_bin=nbin)
-    print(f"Wrote {out}")
+    # The overview shows the data at the binning used for fitting.  When the
+    # result is already on the binned grid (--write-binned) it must not be
+    # binned a second time.
+    already = nbin if (native is None or args.write_binned) else 1
+    written = _write_outputs(args, result, out, window=gui.default_window,
+                             display_bin=max(nbin // already, 1),
+                             data_bin=already)
+    if gui.masked_path:
+        print(f"Masked spectrum (native resolution, current masks): "
+              f"{gui.masked_path}")
+    print(f"Wrote {written}")
     return 0
 
 
@@ -153,7 +196,10 @@ def main(argv=None) -> int:
     parser.add_argument("--write-binned", action="store_true",
                         help="Write the binned spectrum instead of "
                              "evaluating the continuum on the native-"
-                             "resolution pixels")
+                             "resolution pixels. Applies to this run only: "
+                             "it is not saved in the session, so a resumed "
+                             "session writes native resolution unless you "
+                             "give it again.")
     parser.add_argument("--mask", type=_parse_region, action="append",
                         default=[], metavar="W0:W1",
                         help="Hide a wavelength region from the continuum "
@@ -171,7 +217,9 @@ def main(argv=None) -> int:
     parser.add_argument("--masked-output", default=None, metavar="PATH",
                         help="Where to write the intermediate masked "
                              "spectrum (default: <input>_masked.fits; "
-                             "pass 'none' to skip)")
+                             "pass 'none' to skip). Always native "
+                             "resolution; rewritten on --resume so it "
+                             "matches the current masks.")
     parser.add_argument("--low-rej", type=float, default=1.5,
                         help="Chebyshev sigma-clip threshold below the fit "
                              "(absorption; default 1.5, <=0 disables)")
@@ -279,6 +327,7 @@ def main(argv=None) -> int:
         output_on=(spec_native if args.nbin > 1 and not args.write_binned
                    else None),
         session_path=session_out,
+        native=spec_native if args.nbin > 1 else None,
         source={"input": os.path.abspath(args.input), "ext": ext,
                 "bin": args.nbin},
         output_options={"output": os.path.abspath(out) if
@@ -287,7 +336,8 @@ def main(argv=None) -> int:
                         else None,
                         "style": args.style, "plain": bool(args.plain),
                         "full": bool(args.full), "minimal": bool(args.minimal),
-                        "write_binned": bool(args.write_binned)},
+                        "masked_output": (os.path.abspath(masked_out)
+                                          if masked_out else "none")},
     )
     if session_out:
         print(f"Session saved: {session_out}")
@@ -309,27 +359,12 @@ def main(argv=None) -> int:
     out = args.output
     if out is None:
         out = root + "_norm.fits"
-    style = args.style
-    if args.minimal:
-        style = "minimal"
-    write_spectrum(result, out, style=style, plain=args.plain)
-    if args.full:
-        root_o, ext_o = os.path.splitext(out)
-        full_out = root_o + "_full" + (ext_o or ".fits")
-        write_spectrum(result, full_out, style="full", plain=args.plain)
-        print(f"Full-info output: {full_out}")
-    if not args.no_overview:
-        ov_path = os.path.splitext(out)[0] + "_overview.pdf"
-        plot_overview(result, ov_path, zoom=args.overview_zoom,
-                      window=args.window if args.window > 0 else None,
-                      overlap=args.overview_overlap,
-                      bin=1 if args.write_binned else args.nbin)
-        print(f"Overview plot: {ov_path}")
-    if style == "voigt":
-        print("VoigtFit-ready output: MASK 1 = include in fit, 0 = exclude.")
-        print("In your VoigtFit parameter file, remember the 'norm' keyword:")
-        print(f"  data  '{out}'  <resolution>  norm")
-    print(f"Wrote {out} ({n_acc} window(s) accepted)")
+    binned_out = args.nbin if (args.write_binned and args.nbin > 1) else 1
+    written = _write_outputs(args, result, out,
+                             window=args.window if args.window > 0 else None,
+                             display_bin=1 if binned_out > 1 else args.nbin,
+                             data_bin=binned_out)
+    print(f"Wrote {written} ({n_acc} window(s) accepted)")
     return 0
 
 

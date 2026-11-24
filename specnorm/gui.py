@@ -14,6 +14,10 @@ nodes:
   for genuinely bad data such as geocoronal airglow.
   The y-axis autoscale ignores both, so an airglow spike no longer
   flattens the rest of the window.
+* every node that shapes the continuum in view is shown, whichever
+  window's fit it belongs to, and refitting uses exactly the nodes on
+  screen -- so coming back to a region always starts from the original
+  nodes.  A click beside an existing node re-places that node;
 * **left-click** (normal mode) drops a continuum node — the node's flux
   is the median *unmasked* flux within a small box around the click;
 * **right-click** (normal mode) deletes the nearest node;
@@ -65,14 +69,14 @@ from .fitters import BaseFitter, make_fitter, MAX_POLY_DEGREE
 
 HELP_TEXT = (
     "left/right click: add/delete node   m: fit-mask mode (hide from fit "
-    "only)   x: exclude mode (also masked in output)   u: undo node   "
-    "r: reset nodes\n"
+    "only)   x: exclude mode (also masked in output)   u: undo node / last accept   "
+    "r: clear nodes in view\n"
     "f: fit   s: spline (thru nodes)   c: Chebyshev (fits data, sigma-clips "
     "lines; nodes set ref level)   1-9 or [ ]: degree (max 10)   d: drop overlapping fits   "
     "+/-: zoom in/out   "
     "left/right: nudge (shift = bigger step)   up/down: y-zoom   "
     "0: reset view   "
-    "enter/a: accept & next   b: back   q: quit & save"
+    "enter/a: accept & next (accepted fits: just move on)   b: back   q: quit & save"
 )
 
 # Default geocoronal airglow regions (Angstroms): Ly-alpha and the OI
@@ -101,6 +105,13 @@ class WindowState:
     resized: bool = False                   # width changed from its tile
     accepted: bool = False
     accept_seq: int = -1                    # order of acceptance (recency)
+    # Nodes you removed while editing this window, so a copy held by an
+    # older fit does not reappear here.
+    dropped: List[float] = field(default_factory=list)
+    # The range the fit was computed over.  It stays fixed when knitting
+    # later trims the window, so a resumed session can rebuild the fit.
+    fit_w0: Optional[float] = None
+    fit_w1: Optional[float] = None
 
 
 def _build_windows(wmin: float, wmax: float, window: float, overlap_frac: float):
@@ -170,6 +181,7 @@ class ContinuumGUI:
                  masked_path: Optional[str] = None,
                  session_path: Optional[str] = None,
                  output_options: Optional[dict] = None,
+                 native: Optional[Spectrum] = None,
                  low_rej: float = 1.5, high_rej: float = 3.5,
                  niterate: int = 20, grow: int = 6, min_pix: int = 3,
                  source: Optional[dict] = None):
@@ -178,6 +190,10 @@ class ContinuumGUI:
         self.spec = spectrum
         self.mask_dq = mask_dq
         self.masked_path = masked_path
+        # Unbinned spectrum (when fitting on binned data).  The masked
+        # intermediate file is always written on this grid, so it matches
+        # the native-resolution output whatever -b was used.
+        self.native = native
         self.session_path = session_path
         self.source = dict(source or {})
         # How the outputs were requested (path, style, plain, ...), so a
@@ -219,6 +235,11 @@ class ContinuumGUI:
         self._ax = None
         self._finished = False
         self._accept_seq = 0
+        # Nodes that belong to no window any more (their window was
+        # re-tiled or dropped).  They stay visible and are picked up by
+        # the next fit that covers them, so a node is never lost.
+        self.loose: List[tuple] = []
+        self._last_accepted: Optional[WindowState] = None
         # A fresh run may close itself once the whole spectrum is
         # covered; a resumed one never does, since you are editing and
         # decide yourself when to stop (q).
@@ -366,7 +387,16 @@ class ContinuumGUI:
         if event.button == 1:
             sample = self._node_sample(event.xdata)
             if sample is not None:
-                self._detach_accepted(st)
+                self._begin_edit(st)
+                # A click on (or right beside) an existing node re-places
+                # that node.  Two nodes whose sampling boxes overlap carry
+                # the same information, and a spline forced through both
+                # would kink between them.
+                if st.nodes_x:
+                    gap = np.abs(np.asarray(st.nodes_x) - float(event.xdata))
+                    j = int(np.argmin(gap))
+                    if gap[j] <= 2.0 * self.node_box:
+                        self._remove_node(st, j)
                 st.nodes_x.append(float(event.xdata))
                 st.nodes_y.append(float(sample[0]))
                 st.nodes_e.append(float(sample[1]))
@@ -374,12 +404,13 @@ class ContinuumGUI:
                 self._draw()
             else:
                 self._draw(message="No unmasked data near that click")
-        elif event.button == 3 and st.nodes_x:
-            self._detach_accepted(st)
+        elif event.button == 3 and self._display_nodes(st):
+            self._begin_edit(st)
+            if not st.nodes_x:
+                self._draw()
+                return
             i = int(np.argmin(np.abs(np.array(st.nodes_x) - event.xdata)))
-            st.nodes_x.pop(i)
-            st.nodes_y.pop(i)
-            st.nodes_e.pop(i)
+            self._remove_node(st, i)
             self._clear_fit(st)
             self._draw()
 
@@ -423,6 +454,9 @@ class ContinuumGUI:
 
     def _invalidate_fits(self, w0: float, w1: float):
         """Drop nodes inside a (un)masked region and clear affected fits."""
+        self.loose = [n for n in self.loose if not (w0 <= n[0] <= w1)]
+        self._unaccept([s for s in self.states
+                        if not (s.w1 < w0 or s.w0 > w1)])
         for st in self.states:
             if st.w1 < w0 or st.w0 > w1:
                 continue
@@ -471,39 +505,60 @@ class ContinuumGUI:
         elif key == "u":
             if st.nodes_x:
                 self._detach_accepted(st)
-                st.nodes_x.pop()
-                st.nodes_y.pop()
-                st.nodes_e.pop()
+                if st.nodes_x:
+                    self._remove_node(st, len(st.nodes_x) - 1)
                 self._clear_fit(st)
                 self._draw()
-            elif self.idx > 0:
-                # Nothing to undo here: step back to the previous window
-                # and un-accept it (covers an accidental enter/a).
-                self.idx -= 1
-                prev = self.states[self.idx]
-                prev.accepted = False
-                self._mask_mode = False
-                self._mask_start = None
-                self._draw(message=f"Window {self.idx + 1} un-accepted — "
-                                   "edit and re-accept")
+            else:
+                # No node of this window's own to undo: take back the
+                # last acceptance made in this sitting instead (covers an
+                # accidental enter/a).  Fits accepted in an earlier
+                # session are never withdrawn this way.
+                last = self._last_accepted
+                if (last is not None and last.accepted
+                        and any(s is last for s in self.states)):
+                    self.idx = next(i for i, s in enumerate(self.states)
+                                    if s is last)
+                    self._unaccept([last])
+                    self._last_accepted = None
+                    self._mask_mode = None
+                    self._mask_start = None
+                    self._draw(message=f"Window {self.idx + 1} un-accepted — "
+                                       "edit and re-accept")
+                else:
+                    self._draw(message="Nothing to undo — right-click a "
+                                       "node to remove it")
         elif key == "r":
-            self._detach_accepted(st)
+            # Clear every node on screen from this window's working set.
+            self._begin_edit(st)
+            st.dropped.extend(float(x) for x in st.nodes_x)
+            self._forget_loose(st.nodes_x)
             st.nodes_x.clear()
             st.nodes_y.clear()
             st.nodes_e.clear()
             self._clear_fit(st)
             self._draw()
         elif key in ("enter", "a"):
+            if st.accepted and st.fitter is not None:
+                # Already accepted and untouched: Enter only moves on.
+                # Accepting it again would rank it above newer fits and
+                # re-trim its neighbours, changing the continuum.
+                self._step_to_next(note="")
+                return
             if st.fitter is None:
                 self._fit_current()
+                st = self.states[self.idx]
             if st.fitter is None:
                 return  # fit failed; message already shown
             had_gaps = bool(self._coverage_gaps())
             st.accepted = True
             st.accept_seq = self._accept_seq
             self._accept_seq += 1
+            self._last_accepted = st
             self._knit_accepted()
             st = self.states[self.idx]      # knitting may reorder the list
+            self._settle_after_accept(st)
+            st = self.states[self.idx]
             if st.resized:
                 # Zooming or panning changed this window's span, so
                 # re-tile the remaining spectrum from its right edge.
@@ -528,12 +583,7 @@ class ContinuumGUI:
             elif nxt is None:
                 # Everything is covered but you are editing: stay open.
                 self._save_session()
-                if self.idx + 1 < len(self.states):
-                    self.idx += 1
-                self._mask_mode = None
-                self._mask_start = None
-                self._draw(message=(note + "   " if note else "")
-                           + "All regions covered — press q to save and quit")
+                self._step_to_next(note=note)
             else:
                 wrapped = nxt <= self.idx
                 self.idx = nxt
@@ -702,6 +752,164 @@ class ContinuumGUI:
         self._view_width = None
         self._draw(message="View reset to this window's range")
 
+    # ------------------------------------------------------------------
+    # Nodes: every node that matters is visible from every window
+    # ------------------------------------------------------------------
+    NODE_TOL = 1e-6
+
+    @staticmethod
+    def _node_rows(s: WindowState):
+        """(x, y, e) for each node of a window, tolerating a short e list."""
+        es = (s.nodes_e if len(s.nodes_e) == len(s.nodes_x)
+              else [0.0] * len(s.nodes_x))
+        return list(zip(s.nodes_x, s.nodes_y, es))
+
+    def _authority_seq(self, x: float) -> Optional[int]:
+        """Acceptance number of the newest accepted fit covering ``x``."""
+        best = None
+        for s in self.states:
+            if s.accepted and s.fitter is not None and s.w0 <= x <= s.w1:
+                if best is None or s.accept_seq > best:
+                    best = s.accept_seq
+        return best
+
+    def _node_is_live(self, s: WindowState, x: float) -> bool:
+        """Whether a node of window ``s`` still shapes the continuum at x.
+
+        A node of an accepted fit is superseded where a newer accepted
+        fit covers its position (that fit carries its own nodes there).
+        Nodes of fits not yet accepted are always shown.
+        """
+        if not (s.accepted and s.fitter is not None):
+            return True
+        auth = self._authority_seq(x)
+        return auth is None or auth == s.accept_seq
+
+    def _live_nodes(self, v0: float, v1: float,
+                    exclude: Optional[WindowState] = None):
+        """Every current node in [v0, v1], from all windows, de-duplicated."""
+        out = {}
+        for s in self.states:
+            if s is exclude or not s.nodes_x:
+                continue
+            for (x, y, e) in self._node_rows(s):
+                if v0 <= x <= v1 and self._node_is_live(s, x):
+                    out.setdefault(round(x / self.NODE_TOL), (x, y, e))
+        for (x, y, e) in self.loose:
+            if v0 <= x <= v1:
+                out.setdefault(round(x / self.NODE_TOL), (x, y, e))
+        return sorted(out.values())
+
+    def _foreign_nodes(self, st: WindowState):
+        """Nodes in view that this window does not hold yet.
+
+        They belong to neighbouring fits (or to no fit).  They are shown
+        with the window's own nodes and join its fit when you refit, so
+        refitting a region always starts from all the original nodes.
+        """
+        v0, v1 = self._view_range()
+        have = np.asarray(list(st.nodes_x) + list(st.dropped), dtype=float)
+        rows = []
+        for (x, y, e) in self._live_nodes(v0, v1, exclude=st):
+            if have.size and np.min(np.abs(have - x)) < self.NODE_TOL:
+                continue
+            rows.append((x, y, e))
+        return rows
+
+    def _display_nodes(self, st: WindowState):
+        """The nodes to draw for the current window: all that matter in view."""
+        if st.accepted and st.fitter is not None:
+            v0, v1 = self._view_range()
+            return self._live_nodes(v0, v1)
+        return self._node_rows(st) + self._foreign_nodes(st)
+
+    def _forget_loose(self, xs):
+        """Remove nodes at the given positions from the loose pool."""
+        if not self.loose or not len(xs):
+            return
+        xs = np.asarray(list(xs), dtype=float)
+        self.loose = [n for n in self.loose
+                      if np.min(np.abs(xs - n[0])) >= self.NODE_TOL]
+
+    def _keep_loose(self, rows, holder: Optional[WindowState] = None):
+        """Park nodes nobody else holds in the loose pool."""
+        held = [x for s in self.states if s is not holder for x in s.nodes_x]
+        held += [n[0] for n in self.loose]
+        held = np.asarray(held, dtype=float)
+        for (x, y, e) in rows:
+            if held.size and np.min(np.abs(held - x)) < self.NODE_TOL:
+                continue
+            self.loose.append((float(x), float(y), float(e)))
+            held = np.append(held, x)
+
+    def _live_rows(self, s: WindowState):
+        return [r for r in self._node_rows(s) if self._node_is_live(s, r[0])]
+
+    def _unaccept(self, windows):
+        """Withdraw acceptance, keeping only the nodes that still mattered.
+
+        Nodes a newer fit had superseded are hidden while a fit is
+        accepted; they must not reappear just because it no longer is.
+        """
+        windows = [s for s in windows if s.accepted]
+        kept = [self._live_rows(s) for s in windows]   # before any change
+        for s, rows in zip(windows, kept):
+            s.nodes_x = [r[0] for r in rows]
+            s.nodes_y = [r[1] for r in rows]
+            s.nodes_e = [r[2] for r in rows]
+            s.accepted = False
+
+    def _gather_nodes(self, st: WindowState) -> int:
+        """Bring every other node in view into this window's working set."""
+        rows = self._foreign_nodes(st)
+        if not rows:
+            return 0
+        if len(st.nodes_e) != len(st.nodes_x):
+            st.nodes_e = [0.0] * len(st.nodes_x)
+        for (x, y, e) in rows:
+            st.nodes_x.append(float(x))
+            st.nodes_y.append(float(y))
+            st.nodes_e.append(float(e))
+        self._forget_loose([r[0] for r in rows])
+        return len(rows)
+
+    def _begin_edit(self, st: WindowState):
+        """Prepare the current window for a change to its nodes.
+
+        An accepted fit is set aside first (it stays in force until the
+        replacement is accepted), then every node in view joins the
+        working set so the edit starts from all the original nodes.
+        """
+        self._detach_accepted(st)
+        self._gather_nodes(st)
+
+    def _remove_node(self, st: WindowState, i: int):
+        """Delete one node of the working set and remember that it went."""
+        x = st.nodes_x.pop(i)
+        st.nodes_y.pop(i)
+        if i < len(st.nodes_e):
+            st.nodes_e.pop(i)
+        st.dropped.append(float(x))
+        self._forget_loose([x])
+
+    def _settle_nodes_for_fit(self, st: WindowState):
+        """Make the working set exactly the nodes on screen, then fit those.
+
+        What you can see is what you fit: nodes in view are gathered in,
+        and any the window holds outside the view are released (they
+        stay visible there, held by the older fit or the loose pool).
+        """
+        self._gather_nodes(st)
+        v0, v1 = st.w0, st.w1
+        rows = self._node_rows(st)
+        inside = [r for r in rows if v0 <= r[0] <= v1]
+        outside = [r for r in rows if not (v0 <= r[0] <= v1)]
+        if outside:
+            st.nodes_x = [r[0] for r in inside]
+            st.nodes_y = [r[1] for r in inside]
+            st.nodes_e = [r[2] for r in inside]
+            self._keep_loose(outside, holder=st)
+
     def _detach_accepted(self, st: WindowState) -> bool:
         """Keep an accepted fit alive as its own window before it is edited.
 
@@ -719,7 +927,16 @@ class ContinuumGUI:
             nodes_y=list(st.nodes_y), nodes_e=list(st.nodes_e),
             fitter_kind=st.fitter_kind, degree=st.degree,
             fitter=st.fitter, resized=True, accepted=True,
-            accept_seq=st.accept_seq)
+            accept_seq=st.accept_seq, fit_w0=st.fit_w0, fit_w1=st.fit_w1)
+        # The copy being edited starts from the nodes that still matter:
+        # ones a newer fit has superseded are not shown, so they must
+        # not slip back into the new fit either.
+        live = [r for r in self._node_rows(st)
+                if self._node_is_live(st, r[0])]
+        st.nodes_x = [r[0] for r in live]
+        st.nodes_y = [r[1] for r in live]
+        st.nodes_e = [r[2] for r in live]
+        st.dropped = []
         st.accepted = False
         st.accept_seq = -1
         mine = (self._view_override is not None and self._view_idx == self.idx)
@@ -756,15 +973,75 @@ class ContinuumGUI:
         self._set_view(v0, v1, sticky=False)
         return True
 
+    def _step_to_next(self, note: str = ""):
+        """Move on to the next accepted fit when nothing is left to fit.
+
+        Only accepted fits are visited: a leftover fit that was never
+        accepted must not become the current window by accident, where
+        another Enter would accept it.
+        """
+        nxt = self._next_needing_work(self.idx + 1)
+        if nxt is None:
+            n = len(self.states)
+            for k in range(1, n + 1):
+                i = self.idx + k
+                if i >= n:
+                    break
+                s = self.states[i]
+                if s.accepted and s.fitter is not None:
+                    nxt = i
+                    break
+            tail = "All regions covered — press q to save and quit"
+        else:
+            tail = ""
+        if nxt is not None:
+            self.idx = nxt
+        self._mask_mode = None
+        self._mask_start = None
+        self._draw(message="   ".join(t for t in (note, tail) if t))
+
+    def _settle_after_accept(self, cur: WindowState):
+        """Tidy up nodes once a fit has been accepted.
+
+        The accepted fit now speaks for every node in its range, so
+        copies left in fits that were never accepted, and in the loose
+        pool, are removed there (they would otherwise reappear).
+        """
+        cur.dropped = []
+        for s in self.states:
+            if s is cur or s.accepted:
+                continue
+            rows = self._node_rows(s)
+            keep = [r for r in rows if not (cur.w0 <= r[0] <= cur.w1)]
+            if len(keep) != len(rows):
+                s.nodes_x = [r[0] for r in keep]
+                s.nodes_y = [r[1] for r in keep]
+                s.nodes_e = [r[2] for r in keep]
+                if s.fitter is not None:
+                    self._clear_fit(s)
+        self.loose = [n for n in self.loose
+                      if not (cur.w0 <= n[0] <= cur.w1)]
+
     def _jump_to(self, wavelength: float):
-        """Navigate to the window containing a wavelength (map click)."""
+        """Navigate to the window containing a wavelength (map click).
+
+        Where several windows cover the spot, the most recently accepted
+        fit is chosen: it is the one that sets the continuum there.
+        """
+        best = None
         for i, s in enumerate(self.states):
             if s.w0 <= wavelength <= s.w1:
-                self.idx = i
-                self._mask_mode = None
-                self._mask_start = None
-                self._draw(message=f"Jumped to window {i + 1}")
-                return
+                rank = (1, s.accept_seq) if (s.accepted and s.fitter is not None) \
+                    else (0, 0)
+                if best is None or rank > best[0]:
+                    best = (rank, i)
+        if best is not None:
+            i = best[1]
+            self.idx = i
+            self._mask_mode = None
+            self._mask_start = None
+            self._draw(message=f"Jumped to window {i + 1}")
+            return
         nearest = int(np.argmin([min(abs(s.w0 - wavelength),
                                      abs(s.w1 - wavelength))
                                  for s in self.states]))
@@ -852,6 +1129,8 @@ class ContinuumGUI:
         cur = self.states[self.idx]
         dropped = []
         keep = []
+        removed = []
+        partial = []
         for s in self.states:
             if s is cur or not (s.accepted or s.fitter is not None):
                 keep.append(s)
@@ -861,14 +1140,20 @@ class ContinuumGUI:
                 continue
             dropped.append((s.w0, s.w1))
             if s.w0 >= cur.w0 and s.w1 <= cur.w1:
-                continue                      # wholly inside: remove it
-            s.accepted = False
-            self._clear_fit(s)
+                removed.append(s)             # wholly inside: remove it
+                continue
+            partial.append(s)
             keep.append(s)
         if not dropped:
             self._draw(message="No other fits overlap this window")
             return
+        removed_rows = [self._live_rows(s) for s in removed]
+        self._unaccept(partial)
+        for s in partial:
+            self._clear_fit(s)
         self.states = keep
+        for rows in removed_rows:
+            self._keep_loose(rows)
         self.idx = next(i for i, s in enumerate(self.states) if s is cur)
         ranges = ", ".join(f"{a:.1f}-{b:.1f}" for (a, b) in dropped)
         self._draw(message=f"Dropped {len(dropped)} overlapping fit(s) "
@@ -891,6 +1176,7 @@ class ContinuumGUI:
         survivors = []
         retired = 0
         wings = []
+        stray = []
         for s in self.states:
             if s is cur:
                 survivors.append(s)
@@ -899,6 +1185,9 @@ class ContinuumGUI:
             # Anything the new window swallows whole is redundant.
             if s.w0 >= cur.w0 and s.w1 <= cur.w1:
                 retired += 1
+                if not s.accepted:
+                    stray.extend(r for r in self._node_rows(s)
+                                 if not (cur.w0 <= r[0] <= cur.w1))
                 continue
             if not has_work:
                 survivors.append(s)
@@ -910,7 +1199,8 @@ class ContinuumGUI:
                     w1=s.w1, nodes_x=list(s.nodes_x), nodes_y=list(s.nodes_y),
                     nodes_e=list(s.nodes_e), fitter_kind=s.fitter_kind,
                     degree=s.degree, fitter=s.fitter, resized=True,
-                    accepted=s.accepted, accept_seq=s.accept_seq)
+                    accepted=s.accepted, accept_seq=s.accept_seq,
+                    fit_w0=s.fit_w0, fit_w1=s.fit_w1)
                 s.w1 = min(cur.w0 + blend, s.w1)
                 survivors.append(s)
                 survivors.append(right)
@@ -926,6 +1216,7 @@ class ContinuumGUI:
         survivors.sort(key=lambda s: (s.w0, s.w1))
         self.states = survivors
         self.idx = next(i for i, s in enumerate(survivors) if s is cur)
+        self._keep_loose(stray)
         notes = []
         if wings:
             ranges = ", ".join(f"{a:.1f}-{b:.1f}" for (a, b) in wings)
@@ -977,7 +1268,12 @@ class ContinuumGUI:
                          cursor, self.spec.wmax, self.default_window,
                          self.overlap)]
         tail.sort(key=lambda s: s.w0)
+        replaced = [s for s in self.states[self.idx + 1:]
+                    if not any(s is t for t in tail)]
         self.states[self.idx + 1:] = tail
+        for s in replaced:
+            self._keep_loose([r for r in self._node_rows(s)
+                              if not (cur.w0 <= r[0] <= cur.w1)])
 
     def _node_sample(self, x: float):
         """Return (median flux, 1-sigma uncertainty) near x, or None."""
@@ -1021,15 +1317,30 @@ class ContinuumGUI:
         """
         prev = (st.w0, st.w1, st.resized, st.fitter_kind, st.degree,
                 st.fitter, st.continuum, st.cont_err, st.rejected,
-                st.accepted)
+                st.accepted, st.accept_seq, list(st.nodes_x),
+                list(st.nodes_y), list(st.nodes_e), list(st.dropped),
+                st.fit_w0, st.fit_w1)
+        prev_states = list(self.states)
+        prev_loose = list(self.loose)
+        prev_view = (self._view_override, self._view_idx)
         widened = self._adopt_view(st)
         st = self.states[self.idx]
+        self._detach_accepted(st)
+        st = self.states[self.idx]
+        self._settle_nodes_for_fit(st)
         st.fitter_kind, st.degree = kind, degree
         reason = self._fit_window(st)
         if st.fitter is None and prev[5] is not None:
+            # Put everything back exactly as it was, including the
+            # window list (setting an accepted fit aside added a copy).
             (st.w0, st.w1, st.resized, st.fitter_kind, st.degree,
              st.fitter, st.continuum, st.cont_err, st.rejected,
-             st.accepted) = prev
+             st.accepted, st.accept_seq, st.nodes_x, st.nodes_y,
+             st.nodes_e, st.dropped, st.fit_w0, st.fit_w1) = prev
+            self.states = prev_states
+            self.loose = prev_loose
+            self.idx = next(i for i, s in enumerate(self.states) if s is st)
+            self._view_override, self._view_idx = prev_view
             self._draw(message=f"Kept {prev[5].label()} — "
                                + (reason or "the requested model would not fit"))
         else:
@@ -1037,31 +1348,27 @@ class ContinuumGUI:
                 reason = f"Fit now covers {st.w0:.2f}-{st.w1:.2f}"
             self._draw(message=reason or "")
 
-    def _fit_window(self, st: WindowState) -> Optional[str]:
+    def _fit_window(self, st: WindowState, domain=None) -> Optional[str]:
         """Fit one window in place.  Returns an error message or None.
 
         Kept free of drawing so sessions can be restored by refitting
-        every window without a figure.
+        every window without a figure.  ``domain`` is the range a data
+        fit should be computed over when it is not the window's present
+        span (a fit rebuilt after knitting trimmed its window).
         """
         fitter = self._make_fitter(st)
         sel = (self.spec.wavelength >= st.w0) & (self.spec.wavelength <= st.w1)
         st.rejected = None
+        d0, d1 = (st.w0, st.w1) if domain is None else domain
 
         if getattr(fitter, "fits_data", False):
-            # Chebyshev: fit the unmasked data directly, sigma-clipping
-            # outliers.  Nodes (if >= 2) restrict the fitted range.
-            use = sel & self.good
+            # Chebyshev: fit all the unmasked data in the range directly,
+            # sigma-clipping outliers.  Nodes set the reference level for
+            # the first rejection pass; they do not narrow the range --
+            # the visible window is the fitting region.
+            use = ((self.spec.wavelength >= d0) & (self.spec.wavelength <= d1)
+                   & self.good)
             need = st.degree + 2
-            if len(st.nodes_x) >= 2:
-                # Nodes narrow the fitted range -- but only if that
-                # leaves something to fit.  A window trimmed by knitting
-                # can end up beside its own nodes, and intersecting with
-                # them would leave nothing at all.
-                x0, x1 = min(st.nodes_x), max(st.nodes_x)
-                narrowed = use & (self.spec.wavelength >= x0) \
-                    & (self.spec.wavelength <= x1)
-                if int(narrowed.sum()) >= need:
-                    use = narrowed
             n_use = int(use.sum())
             if n_use < need:
                 self._clear_fit(st)
@@ -1077,6 +1384,7 @@ class ContinuumGUI:
             st.continuum = fitter(self.spec.wavelength[sel])
             st.cont_err = fitter.uncertainty(self.spec.wavelength[sel])
             st.fitter = fitter
+            st.fit_w0, st.fit_w1 = float(d0), float(d1)
             # Map clipped points back onto the window for display.
             rejected_global = np.zeros(len(self.spec), dtype=bool)
             rejected_global[np.flatnonzero(use)] = ~fitter.keep
@@ -1090,12 +1398,33 @@ class ContinuumGUI:
             st.continuum = fitter(self.spec.wavelength[sel])
             st.cont_err = fitter.uncertainty(self.spec.wavelength[sel])
             st.fitter = fitter
+            st.fit_w0, st.fit_w1 = float(d0), float(d1)
         return None
+
+    def _nothing_to_refit(self, st: WindowState) -> bool:
+        """True when refitting an accepted window would change nothing."""
+        if not (st.accepted and st.fitter is not None):
+            return False
+        v0, v1 = self._view_range()
+        if abs(v0 - st.w0) > 1e-12 or abs(v1 - st.w1) > 1e-12:
+            return False
+        if self._foreign_nodes(st):
+            return False
+        return all(st.w0 <= x <= st.w1 and self._node_is_live(st, x)
+                   for x in st.nodes_x)
 
     def _fit_current(self, quiet: bool = False):
         st = self.states[self.idx]
+        if self._nothing_to_refit(st):
+            self._draw(message="Fit unchanged")
+            return
         widened = self._adopt_view(st)
         st = self.states[self.idx]
+        # Refitting an accepted fit is redoing it: the accepted one stays
+        # in force until this replacement is accepted.
+        self._detach_accepted(st)
+        st = self.states[self.idx]
+        self._settle_nodes_for_fit(st)
         message = self._fit_window(st)
         if message is None and widened:
             message = f"Fit now covers {st.w0:.2f}-{st.w1:.2f}"
@@ -1171,9 +1500,30 @@ class ContinuumGUI:
                 if shaded:
                     ax.plot([], [], color="0.5", alpha=0.5, lw=6,
                             label="extrapolated (no node)")
-        if st.nodes_x:
-            ax.plot(st.nodes_x, st.nodes_y, "o", color="tab:red", ms=8,
-                    mec="k", zorder=5, label="nodes")
+        # Every node that matters in view is drawn, whichever window's
+        # fit it belongs to.  Nodes left over from an edit that was never
+        # fitted are hollow: they are not part of any fit yet, and join
+        # the next fit made over them.
+        shown = self._display_nodes(st)
+        if shown:
+            loose_x = np.asarray([n[0] for n in self.loose], dtype=float)
+            own_x = np.asarray(st.nodes_x, dtype=float)
+
+            def _unused(x):
+                if not loose_x.size or np.min(np.abs(loose_x - x)) >= self.NODE_TOL:
+                    return False
+                return not (own_x.size
+                            and np.min(np.abs(own_x - x)) < self.NODE_TOL)
+            used = [r for r in shown if not _unused(r[0])]
+            spare = [r for r in shown if _unused(r[0])]
+            if used:
+                ax.plot([r[0] for r in used], [r[1] for r in used], "o",
+                        color="tab:red", ms=8, mec="k", zorder=5,
+                        label="nodes")
+            if spare:
+                ax.plot([r[0] for r in spare], [r[1] for r in spare], "o",
+                        mfc="none", mec="tab:red", mew=1.6, ms=8, zorder=5,
+                        label="nodes not in a fit yet")
         # Evaluate this window's own model so it stays visible after
         # zooming, panning or navigating between windows.
         if st.fitter is not None and w.size:
@@ -1387,18 +1737,32 @@ class ContinuumGUI:
             "exclude_regions": [list(r) for r in
                                 self.spec.meta.get("exclude_regions", [])],
             "accept_seq": self._accept_seq,
-            "windows": [
-                {"w0": float(s.w0), "w1": float(s.w1),
-                 "nodes_x": [float(v) for v in s.nodes_x],
-                 "nodes_y": [float(v) for v in s.nodes_y],
-                 "nodes_e": [float(v) for v in s.nodes_e],
-                 "model": s.fitter_kind, "degree": int(s.degree),
-                 "accepted": bool(s.accepted),
-                 "accept_seq": int(s.accept_seq),
-                 "resized": bool(s.resized)}
-                for s in self.states
-            ],
+            "loose_nodes": [[float(v) for v in n] for n in self.loose],
+            "windows": [self._window_state(s) for s in self.states],
         }
+
+    @staticmethod
+    def _window_state(s: WindowState) -> dict:
+        """One window as plain data, including the fitted model itself
+        where it cannot be rebuilt from nodes alone."""
+        out = {"w0": float(s.w0), "w1": float(s.w1),
+               "nodes_x": [float(v) for v in s.nodes_x],
+               "nodes_y": [float(v) for v in s.nodes_y],
+               "nodes_e": [float(v) for v in s.nodes_e],
+               "dropped": [float(v) for v in s.dropped],
+               "model": s.fitter_kind, "degree": int(s.degree),
+               "accepted": bool(s.accepted),
+               "accept_seq": int(s.accept_seq),
+               "resized": bool(s.resized),
+               "fitted": s.fitter is not None}
+        if s.fit_w0 is not None and s.fit_w1 is not None:
+            out["fit_range"] = [float(s.fit_w0), float(s.fit_w1)]
+        to_state = getattr(s.fitter, "to_state", None)
+        if to_state is not None:
+            saved = to_state()
+            if saved is not None:
+                out["fit_state"] = saved
+        return out
 
     def save_session(self, path: str) -> str:
         """Write the session to JSON so it can be resumed or edited."""
@@ -1415,8 +1779,19 @@ class ContinuumGUI:
         except Exception as exc:      # never let I/O kill the session
             print(f"Warning: could not write session file: {exc}")
 
-    def restore_session(self, state: dict, refit: bool = True):
-        """Rebuild windows, masks and fits from :meth:`session_state`."""
+    def restore_session(self, state: dict, refit: bool = True,
+                        recompute: bool = False):
+        """Rebuild windows, masks and fits from :meth:`session_state`.
+
+        The fits come back exactly as they were saved: node-based fits
+        are rebuilt from their nodes, data fits are reloaded from their
+        saved coefficients (``recompute=True`` refits them instead, over
+        the range they were originally fitted on -- used when the
+        binning has been changed).  Only fits that existed are restored,
+        and a leftover fit that was never accepted in a region that is
+        already covered is not brought back as a fit: its nodes are kept
+        on screen instead, so it cannot be accepted by accident.
+        """
         if not self.output_options:
             self.output_options = dict(state.get("output", {}))
         for key, kind in (("fit_mask_regions", "fit"),
@@ -1436,28 +1811,102 @@ class ContinuumGUI:
                 degree=int(w.get("degree", self.init_degree)),
                 accepted=bool(w.get("accepted", False)),
                 accept_seq=int(w.get("accept_seq", -1)),
-                resized=bool(w.get("resized", False)))
-            states.append(st)
+                resized=bool(w.get("resized", False)),
+                dropped=[float(v) for v in w.get("dropped", [])])
+            if len(st.nodes_e) != len(st.nodes_x):
+                st.nodes_e = [0.0] * len(st.nodes_x)
+            rng = w.get("fit_range")
+            if rng:
+                st.fit_w0, st.fit_w1 = float(rng[0]), float(rng[1])
+            states.append((st, w))
         if states:
-            self.states = states
+            self.states = [s for s, _w in states]
+        self.loose = [tuple(float(v) for v in n)
+                      for n in state.get("loose_nodes", []) if len(n) == 3]
         self._accept_seq = int(state.get("accept_seq", len(self.states)))
         if refit:
-            for st in self.states:
-                if st.nodes_x or st.fitter_kind == "cheb":
-                    if self._fit_window(st) is not None:
-                        st.accepted = False      # could not be rebuilt
-                else:
+            for st, w in states:
+                # Older session files did not record which windows had a
+                # fit; assume the ones that could have been fitted were.
+                had_fit = w.get("fitted",
+                                bool(st.nodes_x) or st.fitter_kind == "cheb")
+                if not (had_fit or st.accepted):
                     st.accepted = False
+                    continue
+                failed = None
+                saved = w.get("fit_state")
+                if saved is not None and not recompute:
+                    try:
+                        fitter = self._make_fitter(st)
+                        fitter.load_state(saved)
+                        st.fitter = fitter
+                    except (AttributeError, KeyError, ValueError, TypeError):
+                        saved = None
+                if saved is None or recompute:
+                    domain = ((st.fit_w0, st.fit_w1)
+                              if st.fit_w0 is not None else None)
+                    failed = self._fit_window(st, domain=domain)
+                if failed is not None:
+                    st.accepted = False          # could not be rebuilt
+            self._dissolve_covered_leftovers()
         first = self._next_needing_work(0)
         self.idx = 0 if first is None else first
         return self
+
+    def _dissolve_covered_leftovers(self):
+        """Retire fits that were never accepted where the spectrum is
+        already covered, keeping their nodes visible.
+
+        Such a fit is the remains of an edit that was started and left.
+        Restored as a live fit it sits one keypress from being accepted
+        over the fit that was actually agreed.
+        """
+        spans = self._covered_spans()
+        merged = []
+        for (a, b) in spans:
+            if merged and a <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], b)
+            else:
+                merged.append([a, b])
+        keep = []
+        stray = []
+        for s in self.states:
+            covered = (not s.accepted) and any(
+                a <= s.w0 and s.w1 <= b for (a, b) in merged)
+            if covered:
+                stray.append(s)
+            else:
+                keep.append(s)
+        if not stray or not keep:
+            return
+        self.states = keep
+        for s in stray:
+            self._keep_loose(self._node_rows(s))
+
+    def _masked_spectrum(self) -> Spectrum:
+        """The spectrum to write as the masked file: native resolution
+        when available, with the current mask regions applied to it."""
+        if self.native is None:
+            return self.spec
+        n = self.native
+        out = Spectrum(n.wavelength.copy(), n.flux.copy(),
+                       error=None if n.error is None else n.error.copy(),
+                       dq=None if n.dq is None else n.dq.copy(),
+                       meta={k: v for k, v in n.meta.items()
+                             if k not in ("fit_mask_regions",
+                                          "exclude_regions", "binning")})
+        for key, kind in (("fit_mask_regions", "fit"),
+                          ("exclude_regions", "exclude")):
+            for (m0, m1) in self.spec.meta.get(key, []):
+                out.mask_region(m0, m1, kind=kind)
+        return out
 
     def _write_masked(self):
         if self.masked_path is None:
             return
         from .writer import write_masked
         try:
-            write_masked(self.spec, self.masked_path)
+            write_masked(self._masked_spectrum(), self.masked_path)
         except Exception as exc:  # don't let I/O kill the session
             print(f"Warning: could not write masked file: {exc}")
 
@@ -1730,8 +2179,11 @@ def load_session(path: str, bin_override: Optional[int] = None,
     spec = read_spectrum(infile, ext=src.get("ext"))
     native = None
     nbin = int(src.get("bin", 1) or 1)
+    rebinned = False
     if bin_override is not None:
-        nbin = max(int(bin_override), 1)
+        new_bin = max(int(bin_override), 1)
+        rebinned = new_bin != nbin
+        nbin = new_bin
         src = dict(src)
         src["bin"] = nbin
     if nbin > 1:
@@ -1749,9 +2201,10 @@ def load_session(path: str, bin_override: Optional[int] = None,
         mask_dq=bool(cfg.get("mask_dq", True)),
         session_path=path,
         masked_path=masked_path,
+        native=native,
         source=src,
         **cfg.get("clip", {}))
-    gui.restore_session(state)
+    gui.restore_session(state, recompute=rebinned)
     # You are editing: decide yourself when to stop.
     gui.finish_when_complete = False
     return gui, native
@@ -1768,6 +2221,7 @@ def normalize_interactive(spectrum: Spectrum, window: float = 20.0,
     ``spectrum`` is binned for fitting), the accepted fits are
     evaluated on that spectrum's wavelength grid instead.
     """
+    kwargs.setdefault("native", output_on)
     gui = ContinuumGUI(spectrum, window=window, overlap=overlap,
                        fitter=fitter, degree=degree, **kwargs)
     result = gui.run()

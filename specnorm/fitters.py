@@ -354,6 +354,38 @@ class ChebyshevFitter(BaseFitter):
             pass
         return self
 
+    # -- persistence ---------------------------------------------------
+    def to_state(self) -> Optional[dict]:
+        """The fitted model as plain numbers, for saving in a session.
+
+        A data fit depends on which pixels it saw, so it cannot be
+        rebuilt reliably from nodes alone; saving the coefficients lets
+        a resumed session reload exactly the curve that was accepted.
+        """
+        dom = getattr(self, "_domain", None)
+        if self._model is None or dom is None:
+            return None
+        cov = getattr(self, "_cov", None)
+        return {
+            "coef": [float(c) for c in np.asarray(self._model.coef)],
+            "domain": [float(dom[0]), float(dom[1])],
+            "cov": (None if cov is None
+                    else [[float(v) for v in row] for row in np.asarray(cov)]),
+        }
+
+    def load_state(self, state: dict) -> "ChebyshevFitter":
+        """Restore a model saved by :meth:`to_state` (no refitting)."""
+        coef = np.asarray(state["coef"], dtype=float)
+        domain = [float(state["domain"][0]), float(state["domain"][1])]
+        if coef.size != self.degree + 1:
+            raise ValueError("saved Chebyshev model does not match its degree")
+        self._model = _cheb.Chebyshev(coef, domain=domain)
+        self._domain = domain
+        cov = state.get("cov")
+        self._cov = None if cov is None else np.asarray(cov, dtype=float)
+        self.keep = None
+        return self
+
     @property
     def support(self):
         dom = getattr(self, "_domain", None)

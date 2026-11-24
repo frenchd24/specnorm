@@ -58,7 +58,8 @@ def _bin_for_display(result: NormalizedSpectrum, nbin: int):
 
 def plot_overview(result: NormalizedSpectrum, path: str,
                   zoom: float = 3.0, window: Optional[float] = None,
-                  overlap: float = 0.15, bin: int = 1) -> str:
+                  overlap: float = 0.15, bin: int = 1,
+                  data_bin: int = 1) -> str:
     """Save an overview figure of flux + continuum.
 
     Parameters
@@ -83,7 +84,12 @@ def plot_overview(result: NormalizedSpectrum, path: str,
         Bin the spectrum by this many pixels *for display only*, so the
         overview shows the same signal-to-noise you fitted against.
         Pass the binning used while fitting; the written output is
-        unaffected.
+        unaffected.  If ``result`` is already on a binned grid, pass 1
+        here and give that factor as ``data_bin`` instead.
+    data_bin : int
+        Binning already applied to ``result`` (e.g. output written with
+        --write-binned).  Only used for the legend, which reports the
+        total binning shown: ``bin * data_bin``.
 
     Returns
     -------
@@ -92,6 +98,7 @@ def plot_overview(result: NormalizedSpectrum, path: str,
     import matplotlib.pyplot as plt
 
     nbin = max(int(bin), 1)
+    shown_bin = nbin * max(int(data_bin), 1)
     wave, flux_d, cont_d, cerr_d, mask_d = _bin_for_display(result, nbin)
     if window is None:
         window = _infer_window(result)
@@ -128,7 +135,7 @@ def plot_overview(result: NormalizedSpectrum, path: str,
         for (m0, m1) in fit_regions:   # fit masks shape the y-scale too
             good &= ~((w >= m0) & (w <= m1))
         ax.plot(w, f, color="0.35", lw=0.6, drawstyle="steps-mid",
-                label="flux" + (f" (binned x{nbin})" if nbin > 1 else ""))
+                label="flux" + (f" (binned x{shown_bin})" if shown_bin > 1 else ""))
         ax.plot(w, c, color="tab:blue", lw=1.6, label="continuum")
         if cerr_d is not None:
             ce = cerr_d[sel]
